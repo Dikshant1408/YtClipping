@@ -52,6 +52,10 @@ python autoclip_watch.py paste "https://www.youtube.com/watch?v=YOUR_VIDEO"
   multilingual audio (Hindi/English) cleanly, fixing the local-Whisper quality
   that breaks clip validation. Falls back to AutoClip's local transcription if
   Groq isn't configured (`USE_CLOUD_WHISPER=0` disables it).
+- **Streamer-friendly subtitle layout** — streamer speech subtitles at the **top**,
+  title card at the **bottom** (so they don't cover game subtitles). Enable with
+  `python -m watcher.patch_layout` (patches the installed AutoClip; re-run after
+  upgrading AutoClip).
 - **Topic-aware metadata, automatically:** title, description with hashtags,
   auto tags, category, language, license, embeddability, made-for-kids. GTA 6 is
   the built-in default (it's what this repo was built around); it's configurable.
