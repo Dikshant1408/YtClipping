@@ -128,7 +128,7 @@ _DEFAULT_TAGS = [
     "funny moments", "gta 6 clips",
 ]
 
-_GAME_HASHTAGS = "#GTA6 #GTAVI #GTA6Shorts #Gaming #Shorts #RockstarGames #ViceCity"
+_GAME_HASHTAGS = "#gta6 #gtavi #gta6shorts #gaming #shorts #rockstargames #vicecity"
 
 
 def _game_title(title: str, game: str) -> str:
@@ -141,7 +141,7 @@ def _game_title(title: str, game: str) -> str:
 
 def _game_description(description: str, game: str, credit: Optional[str] = None) -> str:
     """Append game context + creator credit + hashtags to the description."""
-    if not game or "#GTA6" in description:
+    if not game or "#gta6" in description.lower():
         return description[:5000]
     block = f"{game} (Grand Theft Auto VI) gameplay highlights."
     if credit:
@@ -155,6 +155,7 @@ def _auto_tags(title: str, description: str, extra: Optional[List[str]] = None) 
     tags: List[str] = []
     words = [w.strip("#.,!?").lower() for w in (title + " " + description).split()]
     for t in _DEFAULT_TAGS + words + (extra or []):
+        t = t.lower().strip()
         if t and len(t) > 2 and t not in tags:
             tags.append(t)
     # YouTube caps the total tag string at 500 characters.
@@ -201,7 +202,7 @@ def upload_video(
         description = _game_description(description, game, credit)
 
     if is_short and "#shorts" not in title.lower() and "#shorts" not in description.lower():
-        description = (description + "\n\n#Shorts").strip()
+        description = (description + "\n\n#shorts").strip()
 
     if tags is None:
         tags = _auto_tags(title, description)
