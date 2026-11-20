@@ -31,6 +31,7 @@ from pathlib import Path
 
 from watcher import channels as ch_mod
 from watcher import youtube as yt
+from watcher import __version__
 from watcher.config import Config, load_config, save_config
 from watcher.runner import (
     cleanup_all,
@@ -340,6 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", default=DEFAULT_CONFIG, help="path to config.json")
     p.add_argument("--state", default=DEFAULT_STATE, help="path to state.json")
     p.add_argument("--dry-run", action="store_true", help="log only; do not run autoclip")
+    p.add_argument("--version", action="version", version=f"YtClipping {__version__}")
 
     sub = p.add_subparsers(dest="command", required=True)
     run_p = sub.add_parser("run", help="run one monitoring cycle")

@@ -1,7 +1,7 @@
 """YtClipping watcher package.
 
 Watches selected YouTube channels, clips new uploads with AutoClip, and
-optionally publishes the clips to your own YouTube channel.
+publishes the clips to your own YouTube channel with full metadata.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
