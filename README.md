@@ -53,7 +53,8 @@ python autoclip_watch.py paste "https://www.youtube.com/watch?v=YOUR_VIDEO"
   that breaks clip validation. Falls back to AutoClip's local transcription if
   Groq isn't configured (`USE_CLOUD_WHISPER=0` disables it).
 - **Streamer-friendly subtitle layout** — streamer speech subtitles at the **top**,
-  title card at the **bottom** (so they don't cover game subtitles). Enable with
+  title card at the **bottom** (so they don't cover game subtitles). Also sets
+  Shorts-friendly clip durations (30–90s) so short highlights qualify. Enable with
   `python -m watcher.patch_layout` (patches the installed AutoClip; re-run after
   upgrading AutoClip).
 - **Hinglish / Roman subtitles** — Hindi speech is transliterated to Latin script

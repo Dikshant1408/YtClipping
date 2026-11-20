@@ -119,6 +119,8 @@ def _romanize(text: str) -> str:
     for tok in text.split():
         if _DEV_RE.search(tok):
             s = sanscript.transliterate(tok, sanscript.DEVANAGARI, sanscript.HK)
+            # Drop any Devanagari the scheme missed (avoids mojibake).
+            s = re.sub(r"[\u0900-\u097f]", "", s)
             s = s.replace("M", "n").replace("~", "n").replace("2", "z").lower()
             out.append(s)
         else:

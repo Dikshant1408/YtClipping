@@ -24,6 +24,15 @@ _TITLE_REPLACEMENTS = [
     (r"\\move(540,300,540,250,0,260)", r"\\move(540,1600,540,1640,0,260)"),
 ]
 
+# Shorts-friendly clip durations: the "long" tier defaults to 90s min / 120-360s
+# target, which is too long for Shorts and rejects short clips.
+_QUALITY_REPLACEMENTS = [
+    ("min_clip_sec=90, target_clip_sec=(120, 360), max_clip_sec=480",
+     "min_clip_sec=30, target_clip_sec=(30, 90), max_clip_sec=150"),
+    ("min_clip_sec=45, target_clip_sec=(60, 180), max_clip_sec=300",
+     "min_clip_sec=30, target_clip_sec=(30, 90), max_clip_sec=150"),
+]
+
 
 def _patch(path: str, replacements) -> None:
     p = Path(path)
@@ -43,12 +52,14 @@ def _patch(path: str, replacements) -> None:
 
 
 def apply() -> None:
+    import backend.pipeline.quality as q
     import backend.services.publish_export as pe
     import backend.services.studio.packaging_render as pr
 
     _patch(pe.__file__, _SUB_REPLACEMENTS)
     _patch(pr.__file__, _TITLE_REPLACEMENTS)
-    print("done. subtitles=top, title=bottom")
+    _patch(q.__file__, _QUALITY_REPLACEMENTS)
+    print("done. subtitles=top, title=bottom, clips=30-90s")
 
 
 if __name__ == "__main__":
