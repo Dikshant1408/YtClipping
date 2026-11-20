@@ -1,18 +1,21 @@
-# YtClipping — Shorts Automation
+# YtClipping — Turn long videos into Shorts, auto-post to your channel
 
 ![Demo](demo.gif)
 
-Paste a YouTube link and get ready-to-post **GTA 6 Shorts** on your own channel.
-Built as an automation layer on top of [AutoClip](https://github.com/zhouxiaoka/autoclip)
-(clipping + rendering) with a **direct YouTube uploader**, game-aware metadata,
-creator credits, and long-stream auto-splitting.
+Paste a YouTube link to one of **your own** long videos, streams, podcasts, or
+lectures and get ready-to-post vertical **Shorts** on your own channel — in one
+command.
+
+YtClipping is an automation layer on top of [AutoClip](https://github.com/zhouxiaoka/autoclip)
+(clipping + rendering) that adds a **direct YouTube uploader**, topic-aware
+metadata, creator credits, and long-stream auto-splitting.
 
 ```
 paste URL ──► download ──► AutoClip (transcribe + analyze + render)
           ──► upload Shorts to your channel ──► delete local files
 ```
 
-**Version:** 1.0.0
+**Version:** 1.0.0 · **License:** MIT
 
 ## Quick start (under 2 minutes)
 
@@ -22,7 +25,7 @@ cd YtClipping
 pip install autoclip-mcp google-api-python-client google-auth-oauthlib
 copy .env.example .env          # paste a Groq key into API_OPENAI_API_KEY
 python autoclip_watch.py youtube-login
-python autoclip_watch.py paste "https://www.youtube.com/watch?v=VIDEO_ID"
+python autoclip_watch.py paste "https://www.youtube.com/watch?v=YOUR_VIDEO"
 ```
 
 ## Why use this over vanilla AutoClip?
@@ -30,10 +33,10 @@ python autoclip_watch.py paste "https://www.youtube.com/watch?v=VIDEO_ID"
 | Feature | Original AutoClip | YtClipping |
 |---------|-------------------|------------|
 | **Uploads to your channel** | Manual export or Upload-Post setup | One command, direct YouTube API (no third-party) |
-| **Game-aware metadata** | Generic title/description | Auto GTA 6 title, hashtags, tags, Gaming category |
-| **Creator credit** | Not included | Auto-fetches source channel + `Credit:` line |
+| **Topic-aware metadata** | Generic title/description | Auto title, description, tags, category (GTA 6 by default, configurable) |
+| **Creator credit** | Not included | Auto-fetches the source channel + `Credit:` line |
 | **AutoClip outro** | Forced 1.8s end-card | Removed |
-| **Long streams (>6h)** | Single huge download | Auto-splits into ~3h parts, one at a time |
+| **Long videos (>6h)** | Single huge download | Auto-splits into ~3h parts, one at a time |
 | **Disk usage** | Keeps all project data | Auto-deletes local files after upload |
 | **Clips per video** | Fixed default | Up to 10, above a quality threshold |
 | **Model** | Gemini (rate-limited free tier) | Groq / Gemini / OpenAI / local Ollama |
@@ -45,35 +48,19 @@ python autoclip_watch.py paste "https://www.youtube.com/watch?v=VIDEO_ID"
 - **Direct YouTube upload** via the official YouTube Data API (your own Google
   OAuth — no Upload-Post, no shared rate limit). Falls back to Upload-Post if
   `client_secret.json` is absent.
-- **GTA 6 metadata, automatically:**
-  - Title prefixed `GTA 6: …`
-  - Description with `GTA 6 (Grand Theft Auto VI) gameplay highlights.` + hashtags
-  - Auto tags (`gta 6`, `gta vi`, `vice city`, `rockstar`, `gameplay`, …)
-  - Category **Gaming**, language English, Standard license, embeddable, not made for kids
-- **Creator credit** — fetches the source channel via yt-dlp and adds `Credit: <creator>`.
+- **Topic-aware metadata, automatically:** title, description with hashtags,
+  auto tags, category, language, license, embeddability, made-for-kids. GTA 6 is
+  the built-in default (it's what this repo was built around); it's configurable.
+- **Creator credit** — fetches the source channel via yt-dlp and adds
+  `Credit: <creator>`.
 - **No AutoClip outro** — branding end-card disabled.
 - **Up to 10 clips per video** (configurable), only above a quality threshold.
-- **Long-stream auto-splitter** — streams **> 6h** are downloaded in ~3h sections,
-  processed part-by-part, and uploaded; you never download the whole 9h file at once.
+- **Long-video auto-splitter** — videos **> 6h** are downloaded in ~3h sections,
+  processed part-by-part, and uploaded; you never download the whole file at once.
 - **Auto-cleanup** — local project data (video + renders) is deleted after a
   successful upload to save disk.
 - **Flexible model** — Groq (free/fast), Gemini, OpenAI-compatible, or local Ollama.
 - **Watcher mode** — optionally monitor channels and auto-clip new uploads.
-
-## Requirements
-
-1. **Python 3.10+**
-2. **AutoClip** installed and on `PATH`:
-   ```bash
-   uvx autoclip-mcp        # or:  pip install autoclip-mcp
-   autoclip --version
-   ```
-3. **A model key** in `.env` (Groq recommended — free).
-4. **For uploading:** the one-time YouTube OAuth setup below.
-5. Optional: `pip install faster-whisper` (transcribe videos with no subtitles),
-    `winget install DenoLand.Deno` (reliable yt-dlp downloads).
-
-Uploads default to **private** (`--privacy unlisted|public` to change).
 
 ## What each upload includes
 
@@ -81,10 +68,10 @@ For every Short, the tool sets:
 
 | Field | Value |
 |-------|-------|
-| Title | `GTA 6: <clip hook>` |
-| Description | original + `GTA 6 (Grand Theft Auto VI) gameplay highlights.` + `Credit: <creator>` + `#GTA6 #GTAVI #GTA6Shorts #Gaming #Shorts #RockstarGames #ViceCity` |
-| Tags | GTA 6, GTA VI, Vice City, Rockstar, gameplay, highlights, … (auto) |
-| Category | Gaming (20) |
+| Title | `<game/topic>: <clip hook>` |
+| Description | original + topic context + `Credit: <creator>` + hashtags |
+| Tags | game/topic + `gameplay`, `highlights`, … (auto) |
+| Category | Gaming (20) by default |
 | Language | English |
 | License / embedding | Standard YouTube License / allowed |
 | Made for kids | No |
@@ -93,20 +80,20 @@ For every Short, the tool sets:
 A few Studio-only fields (age restriction, paid promotion, AI-use disclosure,
 comments, Shorts remixing) can't be set via the API and keep YouTube defaults.
 
-## Long streams (> 6h)
+## Long videos (> 6h)
 
-Streams longer than 6 hours are split into ~3h sections automatically. Each
+Videos longer than 6 hours are split into ~3h sections automatically. Each
 section is downloaded with `yt-dlp --download-sections`, processed, uploaded, and
 cleaned up independently:
 
 ```bash
-python autoclip_watch.py paste "https://www.youtube.com/watch?v=9_HOUR_STREAM"
-# -> downloads 0-3h, 3-6h, 6-9h, ... one at a time; uploads Shorts from all parts
+python autoclip_watch.py paste "https://www.youtube.com/watch?v=6_HOUR_STREAM"
+# -> downloads 0-3h, 3-6h, ... one at a time; uploads Shorts from all parts
 ```
 
-Streams ≤ 6h are processed as a single video.
+Videos ≤ 6h are processed as a single file.
 
-**Typical end-to-end time:** ~1–1.75h for a 3h stream, ~1.5–2.5h for a 4h stream
+**Typical end-to-end time:** ~1–1.75h for a 3h video, ~1.5–2.5h for a 4h video
 (transcription is the bottleneck; local Whisper or Groq cloud Whisper).
 
 ## One-time: connect your YouTube channel
@@ -152,7 +139,7 @@ Other providers: Gemini, OpenAI, DeepSeek, Kimi, GLM, or local Ollama/LM Studio
 Monitor channels and auto-clip new uploads:
 
 ```bash
-python autoclip_watch.py add-channel "@SomeChannel"
+python autoclip_watch.py add-channel "@YourChannel"
 python autoclip_watch.py watch      # polls every poll_interval_minutes
 python autoclip_watch.py run        # one cycle
 python autoclip_watch.py list       # processed videos + status
@@ -161,7 +148,7 @@ python autoclip_watch.py list       # processed videos + status
 ## All commands
 
 ```bash
-python autoclip_watch.py paste "<url>"   # paste a link -> GTA 6 Shorts -> upload
+python autoclip_watch.py paste "<url>"   # paste a link -> Shorts -> upload
 python autoclip_watch.py run             # one monitoring cycle
 python autoclip_watch.py watch           # loop forever
 python autoclip_watch.py list            # show processed videos
@@ -186,7 +173,7 @@ python autoclip_watch.py add-channel <url>
 | `poll_interval_minutes` | `30` | Loop interval for `watch`. |
 | `max_videos_per_channel` | `5` | Cap new uploads per channel per cycle. |
 | `autoclip_bin` | `autoclip` | Path/name of the AutoClip CLI. |
-| `produce_timeout_sec` | `14400` | Timeout per produce call (4h; covers long streams). |
+| `produce_timeout_sec` | `14400` | Timeout per produce call (4h; covers long videos). |
 | `max_attempts_per_video` | `3` | Retries before giving up. |
 | `extra_produce_args` | `[]` | Extra flags passed to `autoclip produce`. |
 | `channels[]` | — | Watched channels (see below). |
@@ -198,17 +185,18 @@ Per-channel overrides: `{ "id": "@Handle", "name": "...", "enabled": true, "plat
 1. **Resolve** — handle/URL → channel id (yt-dlp).
 2. **Download** — yt-dlp (whole video ≤6h, or ~3h sections for >6h).
 3. **Produce** — `autoclip produce` transcribes, analyzes with your model, renders Shorts.
-4. **Enrich** — GTA 6 title/description/tags, creator credit.
+4. **Enrich** — topic-aware title/description/tags, creator credit.
 5. **Upload** — YouTube Data API (direct) or Upload-Post.
 6. **Cleanup** — delete local project data.
 
-## Only clip content you have the rights to
+## Use it on content you own (or have permission for)
 
-Re-uploading another creator's videos without permission triggers YouTube
-**Content ID claims** and **reused/inauthentic content** policy (demonetization,
-blocking, or strikes). Only point this at your own videos, creators who gave
-permission, or content you add genuine transformative value to. This tool
-automates the mechanics; it does not grant rights.
+YtClipping is built to help creators **repurpose their own long videos, streams,
+podcasts, and lectures** into Shorts. Only point it at content you created or
+have explicit permission to reuse. Re-uploading another creator's videos without
+permission can trigger YouTube **Content ID claims** and **reused/inauthentic
+content** policy (demonetization, blocking, or strikes). This tool automates the
+mechanics; it does not grant rights to the source.
 
 ## Files
 
@@ -219,6 +207,7 @@ automates the mechanics; it does not grant rights.
 | `watcher/state.py` | Persistent processed-video state |
 | `watcher/channels.py` | RSS monitoring, channel-id resolver, duration/section download |
 | `watcher/runner.py` | AutoClip produce/publish wrappers, split pipeline, cleanup |
-| `watcher/youtube.py` | Direct YouTube upload + metadata (GTA 6, credit, update) |
+| `watcher/youtube.py` | Direct YouTube upload + metadata + update |
 | `config.example.json` | Starter config |
 | `.env.example` | Model/provider template |
+| `LICENSE` | MIT |
