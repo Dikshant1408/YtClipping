@@ -1,4 +1,4 @@
-# YtClipping — GTA 6 Shorts Automation
+# YtClipping — Shorts Automation
 
 Paste a YouTube link and get ready-to-post **GTA 6 Shorts** on your own channel.
 Built as an automation layer on top of [AutoClip](https://github.com/zhouxiaoka/autoclip)
