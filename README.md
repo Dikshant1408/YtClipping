@@ -1,5 +1,7 @@
 # YtClipping — Shorts Automation
 
+![Demo](demo.gif)
+
 Paste a YouTube link and get ready-to-post **GTA 6 Shorts** on your own channel.
 Built as an automation layer on top of [AutoClip](https://github.com/zhouxiaoka/autoclip)
 (clipping + rendering) with a **direct YouTube uploader**, game-aware metadata,
@@ -11,6 +13,31 @@ paste URL ──► download ──► AutoClip (transcribe + analyze + render)
 ```
 
 **Version:** 1.0.0
+
+## Quick start (under 2 minutes)
+
+```bash
+git clone https://github.com/Dikshant1408/YtClipping.git
+cd YtClipping
+pip install autoclip-mcp google-api-python-client google-auth-oauthlib
+copy .env.example .env          # paste a Groq key into API_OPENAI_API_KEY
+python autoclip_watch.py youtube-login
+python autoclip_watch.py paste "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+## Why use this over vanilla AutoClip?
+
+| Feature | Original AutoClip | YtClipping |
+|---------|-------------------|------------|
+| **Uploads to your channel** | Manual export or Upload-Post setup | One command, direct YouTube API (no third-party) |
+| **Game-aware metadata** | Generic title/description | Auto GTA 6 title, hashtags, tags, Gaming category |
+| **Creator credit** | Not included | Auto-fetches source channel + `Credit:` line |
+| **AutoClip outro** | Forced 1.8s end-card | Removed |
+| **Long streams (>6h)** | Single huge download | Auto-splits into ~3h parts, one at a time |
+| **Disk usage** | Keeps all project data | Auto-deletes local files after upload |
+| **Clips per video** | Fixed default | Up to 10, above a quality threshold |
+| **Model** | Gemini (rate-limited free tier) | Groq / Gemini / OpenAI / local Ollama |
+| **Windows quirks** | Empty-stdout aborts, `%APPDATA%` bugs | Patched (fallback parse + plain data dir) |
 
 ## Features
 
@@ -44,20 +71,7 @@ paste URL ──► download ──► AutoClip (transcribe + analyze + render)
 3. **A model key** in `.env` (Groq recommended — free).
 4. **For uploading:** the one-time YouTube OAuth setup below.
 5. Optional: `pip install faster-whisper` (transcribe videos with no subtitles),
-   `winget install DenoLand.Deno` (reliable yt-dlp downloads).
-
-## Quick start
-
-```bash
-# 1. Configure the model (Groq is free)
-copy .env.example .env        # then paste your Groq key into API_OPENAI_API_KEY
-
-# 2. One-time YouTube connection (opens browser)
-python autoclip_watch.py youtube-login
-
-# 3. Paste a link
-python autoclip_watch.py paste "https://www.youtube.com/watch?v=VIDEO_ID"
-```
+    `winget install DenoLand.Deno` (reliable yt-dlp downloads).
 
 Uploads default to **private** (`--privacy unlisted|public` to change).
 
