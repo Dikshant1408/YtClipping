@@ -28,8 +28,10 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 from watcher import channels as ch_mod
+from watcher import transcribe as tr
 from watcher import youtube as yt
 from watcher import __version__
 from watcher.config import Config, load_config, save_config
@@ -100,8 +102,9 @@ def _paste_split(args, cfg, duration, platforms, portrait_style, credit) -> int:
         except Exception as exc:  # noqa: BLE001
             log(f"[split] download part {i+1} failed: {exc}")
             continue
+        srt = _cloud_srt(out, f"part {i+1}")
         try:
-            data = produce(cfg, out, platforms, portrait_style)
+            data = produce(cfg, out, platforms, portrait_style, srt_path=srt)
         except Exception as exc:  # noqa: BLE001
             log(f"[split] produce part {i+1} failed: {exc}")
             _safe_remove(out)
@@ -139,6 +142,30 @@ def _safe_remove(path: str) -> None:
         pass
 
 
+def _use_cloud_whisper() -> bool:
+    """Use Groq cloud Whisper when configured (disable with USE_CLOUD_WHISPER=0)."""
+    if os.environ.get("USE_CLOUD_WHISPER", "").lower() in ("0", "off", "false", "no"):
+        return False
+    return tr.groq_available()
+
+
+def _cloud_srt(source: str, log_label: str) -> Optional[str]:
+    """Transcribe `source` (URL or file) with Groq Whisper; return SRT path or None."""
+    if not _use_cloud_whisper():
+        return None
+    try:
+        log(f"       {log_label}: transcribing with Groq Whisper...")
+        if source.startswith("http"):
+            srt = tr.transcribe_url(source)
+        else:
+            srt = tr.transcribe(source)
+        log(f"       {log_label}: transcript ready -> {Path(srt).name}")
+        return srt
+    except Exception as exc:  # noqa: BLE001
+        log(f"       {log_label}: cloud transcription failed ({exc}); AutoClip will transcribe")
+        return None
+
+
 def cmd_paste(args: argparse.Namespace) -> int:
     """Paste a video link -> produce Shorts -> publish to your channel."""
     cfg = load_config(args.config)
@@ -155,8 +182,9 @@ def cmd_paste(args: argparse.Namespace) -> int:
             credit = ch_mod.video_uploader(args.url)
             return _paste_split(args, cfg, duration, platforms, portrait_style, credit)
 
+    srt_path = _cloud_srt(args.url, "paste")
     try:
-        data = produce(cfg, args.url, platforms, portrait_style)
+        data = produce(cfg, args.url, platforms, portrait_style, srt_path=srt_path)
     except Exception as exc:  # noqa: BLE001
         log(f"ERROR: produce failed: {exc}")
         return 1

@@ -48,6 +48,10 @@ python autoclip_watch.py paste "https://www.youtube.com/watch?v=YOUR_VIDEO"
 - **Direct YouTube upload** via the official YouTube Data API (your own Google
   OAuth — no Upload-Post, no shared rate limit). Falls back to Upload-Post if
   `client_secret.json` is absent.
+- **Accurate cloud transcription** — Groq Whisper (`whisper-large-v3`) transcribes
+  multilingual audio (Hindi/English) cleanly, fixing the local-Whisper quality
+  that breaks clip validation. Falls back to AutoClip's local transcription if
+  Groq isn't configured (`USE_CLOUD_WHISPER=0` disables it).
 - **Topic-aware metadata, automatically:** title, description with hashtags,
   auto tags, category, language, license, embeddability, made-for-kids. GTA 6 is
   the built-in default (it's what this repo was built around); it's configurable.
