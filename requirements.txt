@@ -1,0 +1,7 @@
+# The watcher itself has no third-party dependencies (uses only the stdlib).
+#
+# You DO need AutoClip installed separately for the watcher to do anything:
+#   uvx autoclip-mcp          # or: pip install autoclip-mcp
+#
+# Optional: yt-dlp improves channel-id resolution as a fallback.
+#   pip install yt-dlp

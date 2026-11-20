@@ -1,0 +1,214 @@
+"""YouTube channel monitoring.
+
+Uses the public per-channel RSS feed
+(https://www.youtube.com/feeds/videos.xml?channel_id=UCxxxx). No API key is
+required. The feed lists the most recent uploads (typically up to 15).
+"""
+
+from __future__ import annotations
+
+import re
+import urllib.error
+import urllib.request
+from typing import Dict, List
+from xml.etree import ElementTree as ET
+
+FEED_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+
+# Namespaces used by the YouTube Atom feed.
+NS = {
+    "atom": "http://www.w3.org/2005/Atom",
+    "yt": "http://www.youtube.com/xml/schemas/2015",
+    "media": "http://search.yahoo.com/mrss/",
+}
+
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+# YouTube embeds the channel id under different keys depending on page layout.
+_CHANNEL_ID_RES = [
+    re.compile(r'"externalId":"(UC[\w-]{22})"'),
+    re.compile(r'"browseId":"(UC[\w-]{22})"'),
+    re.compile(r'"channelId":"(UC[\w-]{22})"'),
+    re.compile(r'"(?:channelId|externalId)":"(UC[\w-]{22})"'),
+]
+
+
+def _http_get(url: str, timeout: int = 30) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted host)
+        return resp.read()
+
+
+def resolve_channel_id(url_or_handle: str) -> str:
+    """Resolve a channel URL / @handle / channel_id to a UCxxxx channel id.
+
+    Accepts:
+      - a raw channel id ("UC..." 24 chars)
+      - a full channel URL (youtube.com/@handle, /channel/UC..., /c/name, /user/name)
+      - a bare "@handle"
+
+    Resolution is dependency-free: it fetches the page HTML and extracts the
+    channelId. Falls back to yt-dlp if available.
+    """
+    s = url_or_handle.strip()
+    if re.fullmatch(r"UC[\w-]{22}", s):
+        return s
+
+    if s.startswith("@"):
+        url = f"https://www.youtube.com/{s}"
+    elif s.startswith("http://") or s.startswith("https://"):
+        url = s
+    elif "youtube.com" in s or "youtu.be" in s:
+        url = s if s.startswith("http") else "https://" + s
+    else:
+        # Bare handle without '@'
+        url = f"https://www.youtube.com/@{s.lstrip('@')}"
+
+    try:
+        html = _http_get(url).decode("utf-8", errors="ignore")
+        for pat in _CHANNEL_ID_RES:
+            m = pat.search(html)
+            if m:
+                return m.group(1)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        pass
+
+    # Fallback: yt-dlp can print the channel id / uploader id.
+    yt_id = _resolve_with_ytdlp(url)
+    if yt_id:
+        return yt_id
+
+    raise RuntimeError(
+        f"Could not resolve channel id for '{url_or_handle}'. "
+        "Open the channel in a browser and copy its URL, or install yt-dlp "
+        "(pip install yt-dlp) and retry."
+    )
+
+
+def _resolve_with_ytdlp(url: str) -> str | None:
+    import shutil
+    import subprocess
+
+    exe = shutil.which("yt-dlp")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run(
+            [exe, "--no-warnings", "--flat-playlist", "--print", "channel_id", url],
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        for line in out.stdout.splitlines():
+            line = line.strip()
+            if re.fullmatch(r"UC[\w-]{22}", line):
+                return line
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return None
+
+
+def _ytdlp_exe() -> Optional[str]:
+    import shutil
+
+    return shutil.which("yt-dlp")
+
+
+def video_uploader(url: str) -> Optional[str]:
+    """Return the source video's uploader/channel name via yt-dlp (best effort)."""
+    import subprocess
+
+    exe = _ytdlp_exe()
+    if not exe:
+        return None
+    try:
+        out = subprocess.run(
+            [exe, "--no-warnings", "--skip-download", "--print", "%(uploader)s", url],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        for line in out.stdout.splitlines():
+            line = line.strip()
+            if line and line != "NA":
+                return line
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return None
+
+
+def video_duration(url: str) -> Optional[float]:
+    """Return the source video duration in seconds via yt-dlp (best effort)."""
+    import subprocess
+
+    exe = _ytdlp_exe()
+    if not exe:
+        return None
+    try:
+        out = subprocess.run(
+            [exe, "--no-warnings", "--skip-download", "--print", "%(duration)s", url],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        for line in out.stdout.splitlines():
+            line = line.strip()
+            if line.replace(".", "", 1).isdigit():
+                return float(line)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return None
+
+
+def download_section(url: str, start: float, end: float, out_path: str) -> None:
+    """Download only a time range [start, end) seconds of a video via yt-dlp."""
+    import subprocess
+
+    exe = _ytdlp_exe()
+    if not exe:
+        raise RuntimeError("yt-dlp not found; install it to split long streams")
+    section = f"*{int(start)}-{int(end)}"
+    subprocess.run(
+        [
+            exe, "--no-warnings", "--download-sections", section,
+            "--force-keyframes-at-cuts", "-f", "bv*+ba/b",
+            "--merge-output-format", "mp4", "-o", out_path, url,
+        ],
+        check=True,
+    )
+    """Return recent uploads for a channel from its RSS feed.
+
+    Each entry: {video_id, title, published (ISO 8601), url}.
+    """
+    raw = _http_get(FEED_URL.format(channel_id=channel_id))
+    root = ET.fromstring(raw)
+
+    entries: List[Dict[str, str]] = []
+    for entry in root.findall("atom:entry", NS):
+        video_id_el = entry.find("yt:videoId", NS)
+        if video_id_el is None or not video_id_el.text:
+            continue
+        video_id = video_id_el.text.strip()
+
+        title_el = entry.find("atom:title", NS)
+        title = title_el.text.strip() if title_el is not None and title_el.text else ""
+
+        published_el = entry.find("atom:published", NS)
+        published = published_el.text.strip() if published_el is not None and published_el.text else ""
+
+        entries.append(
+            {
+                "video_id": video_id,
+                "title": title,
+                "published": published,
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+            }
+        )
+    return entries

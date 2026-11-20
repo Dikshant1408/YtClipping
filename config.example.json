@@ -1,0 +1,22 @@
+{
+  "platform": "youtube_shorts",
+  "portrait_style": "podcast",
+  "auto_publish": true,
+  "max_clips_per_video": 2,
+  "poll_interval_minutes": 30,
+  "max_videos_per_channel": 5,
+  "autoclip_bin": "autoclip",
+  "produce_timeout_sec": 3600,
+  "lookback_hours": 0,
+  "max_attempts_per_video": 3,
+  "extra_produce_args": [],
+  "channels": [
+    {
+      "id": "UCxxxxxxxxxxxxxxxxxxxxxx",
+      "name": "Example Channel",
+      "enabled": true,
+      "platforms": ["youtube_shorts"],
+      "max_clips": 0
+    }
+  ]
+}

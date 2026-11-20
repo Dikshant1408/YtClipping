@@ -1,0 +1,17 @@
+# Runtime data (never commit state or secrets)
+config.json
+state.json
+.env
+client_secret.json
+token.json
+*.corrupt.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
