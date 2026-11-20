@@ -168,21 +168,27 @@ def video_duration(url: str) -> Optional[float]:
 
 
 def download_section(url: str, start: float, end: float, out_path: str) -> None:
-    """Download only a time range [start, end) seconds of a video via yt-dlp."""
-    import subprocess
+    """Download only a time range [start, end) seconds of a video via yt-dlp.
 
-    exe = _ytdlp_exe()
-    if not exe:
-        raise RuntimeError("yt-dlp not found; install it to split long streams")
-    section = f"*{int(start)}-{int(end)}"
-    subprocess.run(
-        [
-            exe, "--no-warnings", "--download-sections", section,
-            "--force-keyframes-at-cuts", "-f", "bv*+ba/b",
-            "--merge-output-format", "mp4", "-o", out_path, url,
-        ],
-        check=True,
-    )
+    Uses the yt-dlp Python library with a JS runtime (the CLI 403s on Windows).
+    """
+    import yt_dlp
+
+    from watcher.transcribe import _js_runtimes
+
+    opts = {
+        "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+        "outtmpl": out_path,
+        "download_ranges": yt_dlp.utils.download_range_func(None, [(start, end)]),
+        "force_keyframes_at_cuts": False,
+        "merge_output_format": "mp4",
+        "js_runtimes": _js_runtimes(),
+        "quiet": True,
+        "noplaylist": True,
+        "noprogress": True,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
     """Return recent uploads for a channel from its RSS feed.
 
     Each entry: {video_id, title, published (ISO 8601), url}.
