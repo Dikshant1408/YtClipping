@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -101,6 +102,30 @@ def _fmt(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+_DEV_RE = re.compile(r"[\u0900-\u097f]")
+
+
+def _romanize(text: str) -> str:
+    """Convert Devanagari words to natural Roman (Hinglish); keep Latin words as-is.
+
+    Uses the HK scheme then cleans it (anusvara M->n, chandrabindu ~->n,
+    nukta 2->z, lowercased). Words without Devanagari (e.g. "GTA") are untouched.
+    """
+    try:
+        from indic_transliteration import sanscript
+    except Exception:
+        return text
+    out = []
+    for tok in text.split():
+        if _DEV_RE.search(tok):
+            s = sanscript.transliterate(tok, sanscript.DEVANAGARI, sanscript.HK)
+            s = s.replace("M", "n").replace("~", "n").replace("2", "z").lower()
+            out.append(s)
+        else:
+            out.append(tok)
+    return " ".join(out)
+
+
 def _to_srt(segments: List[dict]) -> str:
     out = []
     for i, seg in enumerate(segments, start=1):
@@ -126,6 +151,7 @@ def transcribe(src: str | Path, srt_out: Optional[str | Path] = None) -> str:
     srt_path = Path(srt_out) if srt_out else (Path(tempfile.gettempdir()) / (src_path.stem + ".groq.srt"))
 
     tmp = Path(tempfile.mkdtemp(prefix="ac-groq-whisper-"))
+    roman = os.environ.get("TRANSCRIBE_SCRIPT", "roman").lower() != "devanagari"
     try:
         audio = tmp / "audio.mp3"
         _extract_audio(src_path, audio)
@@ -138,6 +164,8 @@ def transcribe(src: str | Path, srt_out: Optional[str | Path] = None) -> str:
             for seg in segs:
                 seg["start"] = float(seg.get("start", 0.0)) + offset
                 seg["end"] = float(seg.get("end", 0.0)) + offset
+                if roman:
+                    seg["text"] = _romanize(seg.get("text", ""))
                 all_segments.append(seg)
             offset += _duration(chunk)
 

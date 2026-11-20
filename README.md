@@ -56,6 +56,10 @@ python autoclip_watch.py paste "https://www.youtube.com/watch?v=YOUR_VIDEO"
   title card at the **bottom** (so they don't cover game subtitles). Enable with
   `python -m watcher.patch_layout` (patches the installed AutoClip; re-run after
   upgrading AutoClip).
+- **Hinglish / Roman subtitles** — Hindi speech is transliterated to Latin script
+  (e.g. `aja main GTA 6 khela raha hun`) so English/Hinglish viewers can read it,
+  instead of Devanagari. Set `TRANSCRIBE_SCRIPT=devanagari` in `.env` for Hindi
+  script, or `roman` (default) for Hinglish. English words like "GTA" are preserved.
 - **Topic-aware metadata, automatically:** title, description with hashtags,
   auto tags, category, language, license, embeddability, made-for-kids. GTA 6 is
   the built-in default (it's what this repo was built around); it's configurable.
