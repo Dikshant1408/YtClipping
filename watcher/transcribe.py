@@ -147,20 +147,33 @@ def transcribe(src: str | Path, srt_out: Optional[str | Path] = None) -> str:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _js_runtimes() -> dict:
+    """Detect an available JS runtime for yt-dlp (YouTube needs one)."""
+    found = {}
+    for name in ("deno", "node", "bun", "quickjs"):
+        path = shutil.which(name)
+        if path:
+            found[name] = {"path": path}
+    return found
+
+
 def transcribe_url(url: str, srt_out: Optional[str | Path] = None) -> str:
-    """Download audio for a URL and transcribe it via Groq Whisper -> SRT path."""
-    exe = shutil.which("yt-dlp")
-    if not exe:
-        raise RuntimeError("yt-dlp not found")
+    """Download audio for a URL (via yt-dlp library) and transcribe it -> SRT path."""
+    import yt_dlp
+
     tmp = Path(tempfile.mkdtemp(prefix="ac-yt-audio-"))
     try:
-        out_tmpl = str(tmp / "audio.%(ext)s")
-        subprocess.run(
-            [exe, "--no-warnings", "-f", "bestaudio/best", "-x", "--audio-format", "mp3",
-             "-o", out_tmpl, url],
-            check=True, capture_output=True,
-        )
-        files = list(tmp.glob("audio.*"))
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": str(tmp / "audio.%(ext)s"),
+            "js_runtimes": _js_runtimes(),
+            "quiet": True,
+            "noplaylist": True,
+            "noprogress": True,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        files = [f for f in tmp.iterdir() if f.name.startswith("audio.")]
         if not files:
             raise RuntimeError("audio download produced no file")
         return transcribe(files[0], srt_out)
