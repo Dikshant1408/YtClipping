@@ -251,6 +251,10 @@ def cmd_paste(args: argparse.Namespace) -> int:
     log(f"[paste] {args.url}")
     log(f"        platforms={platforms} style={portrait_style} publish={not args.no_publish}")
 
+    # Check for an existing saved job before producing anything (Fix #1: resumption).
+    saved = state.get(video_id)
+    existing_status = saved.get("status") if saved else None
+
     # Long streams are split into sections and processed part by part.
     if not args.no_publish:
         duration = ch_mod.video_duration(args.url)
@@ -258,57 +262,65 @@ def cmd_paste(args: argparse.Namespace) -> int:
             credit = ch_mod.video_uploader(args.url)
             return _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style, credit)
 
-    srt_path = _cloud_srt(args.url, "paste")
-    try:
-        data = produce(cfg, args.url, platforms, portrait_style, srt_path=srt_path)
-    except Exception as exc:  # noqa: BLE001
-        _safe_remove(srt_path)
-        log(f"ERROR: produce failed: {exc}")
-        return 1
-    _safe_remove(srt_path)
-
-    project_id = data.get("project_id") or ""
-    clips = extract_clips(data)
-    if not clips:
-        log("No clips produced (video may be too short or have no highlight-worthy segments).")
-        log(f"project_id={project_id}")
-        state.put(video_id, {
-            "status": "failed", "error": "no clips produced",
-            "project_id": project_id, "platforms": platforms,
-        })
-        state.save()
+    # Resume an existing produced/publishing job instead of re-producing.
+    clips = None
+    clip_ids = None
+    project_id = None
+    if existing_status in ("produced", "publishing", "partially_published") and saved:
+        project_id = saved.get("project_id") or ""
+        clips = saved.get("clips") or []
+        clip_ids = saved.get("selected_clip_ids") or []
+        log(f"       resuming saved job: project={project_id} clips={len(clip_ids)} status={existing_status}")
+    elif existing_status == "published":
+        log("       already published, skipping")
         return 0
 
-    log(f"Produced {len(clips)} clip(s) (project {project_id}):")
-    for c in clips:
-        log(f"  - [{c.get('id')}] score={c.get('score', c.get('score_100'))} {c.get('title', '')}")
+    # Produce clips if we don't have a saved job.
+    if clips is None:
+        srt_path = _cloud_srt(args.url, "paste")
+        try:
+            data = produce(cfg, args.url, platforms, portrait_style, srt_path=srt_path)
+        except Exception as exc:  # noqa: BLE001
+            _safe_remove(srt_path)
+            log(f"ERROR: produce failed: {exc}")
+            return 1
+        _safe_remove(srt_path)
+
+        project_id = data.get("project_id") or ""
+        clips = extract_clips(data)
+        if not clips:
+            log("No clips produced (video may be too short or have no highlight-worthy segments).")
+            log(f"project_id={project_id}")
+            state.put(video_id, {
+                "status": "failed", "error": "no clips produced",
+                "project_id": project_id, "platforms": platforms,
+            })
+            state.save()
+            return 0
+
+        log(f"Produced {len(clips)} clip(s) (project {project_id}):")
+        for c in clips:
+            log(f"  - [{c.get('id')}] score={c.get('score', c.get('score_100'))} {c.get('title', '')}")
+
+        clip_ids = [str(c.get("id") or c.get("clip_id")) for c in clips]
 
     if args.no_publish:
         log("Skipping publish (--no-publish). Download the kit with: autoclip outputs "
             f"{project_id} --export-kits")
         state.put(video_id, {
             "status": "produced", "project_id": project_id, "platforms": platforms,
-            "clips": clips,
-            "selected_clip_ids": [str(c.get("id") or c.get("clip_id")) for c in clips],
+            "clips": clips, "selected_clip_ids": clip_ids,
         })
         state.save()
         return 0
 
-    # Prefer direct YouTube upload when configured; otherwise fall back to Upload-Post.
-    if yt.CLIENT_SECRET.exists():
-        credit = ch_mod.video_uploader(args.url)
-        if credit:
-            log(f"        crediting creator: {credit}")
-        videos = yt.rendered_videos(data)
-        if not videos:
-            log("No rendered video files found to upload (project produced no outputs).")
-            return 0
-        videos = videos[: max(1, args.clips)]
-
-        # Persistent per-clip tracking for manual paste (Fix #3).
-        clip_ids = [str(v.get("id", i)) for i, v in enumerate(videos)]
-        clips_upload: Dict[str, Any] = {}
-        for cid in clip_ids:
+    # Build per-clip upload tracking, preserving any previously saved state.
+    clips_upload: Dict[str, Any] = {}
+    for cid in clip_ids:
+        saved_clip = (saved or {}).get("clips_upload", {}).get(cid)
+        if saved_clip:
+            clips_upload[cid] = saved_clip
+        else:
             clips_upload[cid] = {
                 "status": "pending",
                 "platforms": {
@@ -317,6 +329,36 @@ def cmd_paste(args: argparse.Namespace) -> int:
                     for p in platforms
                 },
             }
+
+    # Prefer direct YouTube upload when configured; otherwise fall back to Upload-Post.
+    if yt.CLIENT_SECRET.exists():
+        credit = ch_mod.video_uploader(args.url)
+        if credit:
+            log(f"        crediting creator: {credit}")
+        # rendered_videos needs clip paths; map clip ids to rendered videos by index.
+        videos = yt.rendered_videos({"outputs": clips}) if clips else []
+        if not videos:
+            log("No rendered video files found to upload (project produced no outputs).")
+            return 0
+        videos = videos[: max(1, args.clips)]
+        # Align clip_ids with available rendered videos.
+        clip_ids = [str(v.get("id", i)) for i, v in enumerate(videos)]
+        # Rebuild tracking for the aligned clip set.
+        clips_upload = {}
+        for cid in clip_ids:
+            saved_clip = (saved or {}).get("clips_upload", {}).get(cid)
+            if saved_clip:
+                clips_upload[cid] = saved_clip
+            else:
+                clips_upload[cid] = {
+                    "status": "pending",
+                    "platforms": {
+                        publish_platform(p): {"status": "pending", "youtube_id": None,
+                                              "youtube_url": None, "error": None, "attempts": 0}
+                        for p in platforms
+                    },
+                }
+
         state.put(video_id, {
             "status": "publishing", "project_id": project_id, "platforms": platforms,
             "clips": clips, "selected_clip_ids": clip_ids, "clips_upload": clips_upload,
@@ -363,7 +405,7 @@ def cmd_paste(args: argparse.Namespace) -> int:
                 failed.append(Path(v['path']).name)
                 log(f"Upload failed for {Path(v['path']).name}: {exc}")
 
-            # Persist after EVERY upload attempt (Fix #2).
+            # Persist after EVERY upload attempt.
             clips_upload[cid]["platforms"][pub_plat] = plat_track
             all_statuses = [c2["platforms"].get(pub_plat, {}).get("status", "pending")
                             for c2 in clips_upload.values()]
@@ -385,6 +427,7 @@ def cmd_paste(args: argparse.Namespace) -> int:
         cleanup_project(project_id)  # free disk once everything is safely uploaded
         return 0
 
+    # Upload-Post fallback with same recovery tracking.
     clip_ids = top_clip_ids(clips, args.clips)
     if not clip_ids:
         log("No publishable clip ids found.")
@@ -395,18 +438,52 @@ def cmd_paste(args: argparse.Namespace) -> int:
     for cid in clip_ids:
         for plat in platforms:
             pub_plat = publish_platform(plat)
+            plat_track = clips_upload[cid]["platforms"].get(pub_plat, {"status": "pending", "attempts": 0})
+            if plat_track["status"] == "published":
+                published += 1
+                continue
+            if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
+                log(f"       clip {cid} -> {pub_plat}: max attempts reached, skipping")
+                failed_uploads.append((cid, pub_plat))
+                continue
+            plat_track["attempts"] += 1
             try:
                 publish(cfg, project_id, cid, pub_plat)
+                plat_track["status"] = "published"
                 published += 1
                 log(f"Published clip {cid} -> {pub_plat}")
             except Exception as exc:  # noqa: BLE001
+                plat_track["status"] = "failed"
+                plat_track["error"] = str(exc)
                 failed_uploads.append((cid, pub_plat))
                 log(f"Publish failed clip {cid} -> {pub_plat}: {exc}")
+
+            # Persist after every publish attempt.
+            clips_upload[cid]["platforms"][pub_plat] = plat_track
+            state.put(video_id, {
+                "status": _video_final_status_paste(clips_upload),
+                "project_id": project_id, "platforms": platforms,
+                "clips": clips, "selected_clip_ids": clip_ids, "clips_upload": clips_upload,
+                "published": [],
+            })
+            state.save()
     log(f"Done. Published {published} clip(s). project_id={project_id}")
     if failed_uploads:
         log(f"WARNING: {len(failed_uploads)} publish(s) failed: {failed_uploads}")
         return 1
     return 0
+
+
+def _video_final_status_paste(clips_upload: Dict[str, Any]) -> str:
+    """Compute overall paste job status from per-clip tracking."""
+    statuses = [c.get("status", "pending") for c in clips_upload.values()]
+    if not statuses:
+        return "failed"
+    if all(s == "published" for s in statuses):
+        return "published"
+    if any(s in ("published", "partially_published") for s in statuses):
+        return "partially_published"
+    return "failed"
 
 
 def cmd_youtube_login(args: argparse.Namespace) -> int:
