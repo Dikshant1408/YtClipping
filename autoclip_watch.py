@@ -300,6 +300,13 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                 section_status = "done"
             elif part_failed:
                 section_status = "partial"
+            # Any clip still pending/upload_unknown (inconclusive) means partial, not failed.
+            elif any(
+                c.get("platforms", {}).get(p, {}).get("status") in ("pending", "upload_unknown")
+                for c in all_clips
+                for p in all_platforms
+            ):
+                section_status = "partial"
             else:
                 section_status = "failed"
             section_progress[part_key] = {
@@ -557,6 +564,13 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
             section_status = "done"
         elif part_failed:
             section_status = "partial"
+        # Any clip still pending/upload_unknown (inconclusive) means partial, not failed.
+        elif any(
+            c.get("platforms", {}).get(p, {}).get("status") in ("pending", "upload_unknown")
+            for c in all_clips_tracked
+            for p in all_platforms
+        ):
+            section_status = "partial"
         else:
             section_status = "failed"
         section_progress[part_key] = {
@@ -645,6 +659,7 @@ def _check_youtube_existing_upload(title: str) -> tuple[Optional[bool], Optional
             maxResults=5,
         )
         response = request.execute()
+        found_wrong_channel = False
         for item in response.get("items", []):
             snippet = item.get("snippet", {})
             if snippet.get("title", "").strip().lower() == title.strip().lower():
@@ -653,10 +668,14 @@ def _check_youtube_existing_upload(title: str) -> tuple[Optional[bool], Optional
                     vid = item["id"]["videoId"]
                     return (True, f"https://youtu.be/{vid}")
                 else:
-                    # Matching title but different channel — definitively NOT ours.
-                    return (False, None)
-        # No matching title found in search — inconclusive. The upload may exist
-        # beyond maxResults or not yet be indexed. Do not treat as definitive absence.
+                    # Matching title but different channel — note it, but
+                    # keep checking: a later result may belong to us.
+                    found_wrong_channel = True
+        # No owned match found. If we saw the title on another channel,
+        # definitively not ours; otherwise inconclusive (no title match at
+        # all in search — may be beyond maxResults or not yet indexed).
+        if found_wrong_channel:
+            return (False, None)
         return (None, None)
     except Exception:  # noqa: BLE001
         # OAuth invalid, network failure, API error, permissions — can't determine.
