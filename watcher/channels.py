@@ -10,12 +10,11 @@ from __future__ import annotations
 import re
 import urllib.error
 import urllib.request
-from typing import Dict, List
+from typing import Dict, List, Optional  # FIX #3: Optional was missing
 from xml.etree import ElementTree as ET
 
 FEED_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 
-# Namespaces used by the YouTube Atom feed.
 NS = {
     "atom": "http://www.w3.org/2005/Atom",
     "yt": "http://www.youtube.com/xml/schemas/2015",
@@ -27,7 +26,6 @@ _UA = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
-# YouTube embeds the channel id under different keys depending on page layout.
 _CHANNEL_ID_RES = [
     re.compile(r'"externalId":"(UC[\w-]{22})"'),
     re.compile(r'"browseId":"(UC[\w-]{22})"'),
@@ -38,21 +36,12 @@ _CHANNEL_ID_RES = [
 
 def _http_get(url: str, timeout: int = 30) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted host)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         return resp.read()
 
 
 def resolve_channel_id(url_or_handle: str) -> str:
-    """Resolve a channel URL / @handle / channel_id to a UCxxxx channel id.
-
-    Accepts:
-      - a raw channel id ("UC..." 24 chars)
-      - a full channel URL (youtube.com/@handle, /channel/UC..., /c/name, /user/name)
-      - a bare "@handle"
-
-    Resolution is dependency-free: it fetches the page HTML and extracts the
-    channelId. Falls back to yt-dlp if available.
-    """
+    """Resolve a channel URL / @handle / channel_id to a UCxxxx channel id."""
     s = url_or_handle.strip()
     if re.fullmatch(r"UC[\w-]{22}", s):
         return s
@@ -64,7 +53,6 @@ def resolve_channel_id(url_or_handle: str) -> str:
     elif "youtube.com" in s or "youtu.be" in s:
         url = s if s.startswith("http") else "https://" + s
     else:
-        # Bare handle without '@'
         url = f"https://www.youtube.com/@{s.lstrip('@')}"
 
     try:
@@ -76,7 +64,6 @@ def resolve_channel_id(url_or_handle: str) -> str:
     except (urllib.error.URLError, TimeoutError, OSError):
         pass
 
-    # Fallback: yt-dlp can print the channel id / uploader id.
     yt_id = _resolve_with_ytdlp(url)
     if yt_id:
         return yt_id
@@ -88,7 +75,7 @@ def resolve_channel_id(url_or_handle: str) -> str:
     )
 
 
-def _resolve_with_ytdlp(url: str) -> str | None:
+def _resolve_with_ytdlp(url: str) -> Optional[str]:
     import shutil
     import subprocess
 
@@ -113,7 +100,6 @@ def _resolve_with_ytdlp(url: str) -> str | None:
 
 def _ytdlp_exe() -> Optional[str]:
     import shutil
-
     return shutil.which("yt-dlp")
 
 
@@ -168,10 +154,7 @@ def video_duration(url: str) -> Optional[float]:
 
 
 def download_section(url: str, start: float, end: float, out_path: str) -> None:
-    """Download only a time range [start, end) seconds of a video via yt-dlp.
-
-    Uses the yt-dlp Python library with a JS runtime (the CLI 403s on Windows).
-    """
+    """Download only a time range [start, end) seconds of a video via yt-dlp."""
     import yt_dlp
 
     from watcher.transcribe import _js_runtimes
@@ -189,6 +172,11 @@ def download_section(url: str, start: float, end: float, out_path: str) -> None:
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
+
+
+# FIX #2: fetch_channel_entries was unreachable dead code buried inside
+# download_section. It is now a proper top-level function.
+def fetch_channel_entries(channel_id: str) -> List[Dict[str, str]]:
     """Return recent uploads for a channel from its RSS feed.
 
     Each entry: {video_id, title, published (ISO 8601), url}.
@@ -207,7 +195,11 @@ def download_section(url: str, start: float, end: float, out_path: str) -> None:
         title = title_el.text.strip() if title_el is not None and title_el.text else ""
 
         published_el = entry.find("atom:published", NS)
-        published = published_el.text.strip() if published_el is not None and published_el.text else ""
+        published = (
+            published_el.text.strip()
+            if published_el is not None and published_el.text
+            else ""
+        )
 
         entries.append(
             {

@@ -28,15 +28,17 @@ class Config:
     max_videos_per_channel: int = 5
     autoclip_bin: str = "autoclip"
     produce_timeout_sec: int = 3600
-    lookback_hours: int = 0  # 0 -> only videos newer than last run (first run: newest only)
+    publish_timeout_sec: int = 120   # FIX #5: separate timeout for publish (was reusing produce's 4h)
+    lookback_hours: int = 0
     extra_produce_args: List[str] = field(default_factory=list)
-    max_attempts_per_video: int = 3  # retries for failed/pending before giving up
+    max_attempts_per_video: int = 3
 
     def channel_platforms(self, ch: Channel) -> List[str]:
         return ch.platforms or [self.platform]
 
     def channel_max_clips(self, ch: Channel) -> int:
-        return ch.max_clips or self.max_clips_per_video
+        # FIX #9: 0 means "use global default"; clamp to >= 1 so publish never silently no-ops
+        return max(1, ch.max_clips or self.max_clips_per_video)
 
 
 def _default_config() -> Config:
@@ -55,11 +57,16 @@ def load_config(path: str | Path) -> Config:
     cfg.platform = data.get("platform", cfg.platform)
     cfg.portrait_style = data.get("portrait_style", cfg.portrait_style)
     cfg.auto_publish = bool(data.get("auto_publish", cfg.auto_publish))
-    cfg.max_clips_per_video = int(data.get("max_clips_per_video", cfg.max_clips_per_video))
+    # FIX #9: clamp to >= 1 on load as well
+    cfg.max_clips_per_video = max(1, int(data.get("max_clips_per_video", cfg.max_clips_per_video)))
     cfg.poll_interval_minutes = int(data.get("poll_interval_minutes", cfg.poll_interval_minutes))
     cfg.max_videos_per_channel = int(data.get("max_videos_per_channel", cfg.max_videos_per_channel))
+    # FIX #14: resolve the bin via shutil.which at runtime in runner.py;
+    # still store whatever is in config (could be "autoclip" or a full path),
+    # but runner.py's ensure_autoclip uses shutil.which so a bare name works fine.
     cfg.autoclip_bin = data.get("autoclip_bin", cfg.autoclip_bin)
     cfg.produce_timeout_sec = int(data.get("produce_timeout_sec", cfg.produce_timeout_sec))
+    cfg.publish_timeout_sec = int(data.get("publish_timeout_sec", cfg.publish_timeout_sec))
     cfg.lookback_hours = int(data.get("lookback_hours", cfg.lookback_hours))
     cfg.extra_produce_args = list(data.get("extra_produce_args", []))
     cfg.max_attempts_per_video = int(data.get("max_attempts_per_video", cfg.max_attempts_per_video))
@@ -95,6 +102,7 @@ def save_config(cfg: Config, path: str | Path) -> None:
         "max_videos_per_channel": cfg.max_videos_per_channel,
         "autoclip_bin": cfg.autoclip_bin,
         "produce_timeout_sec": cfg.produce_timeout_sec,
+        "publish_timeout_sec": cfg.publish_timeout_sec,
         "lookback_hours": cfg.lookback_hours,
         "extra_produce_args": cfg.extra_produce_args,
         "max_attempts_per_video": cfg.max_attempts_per_video,

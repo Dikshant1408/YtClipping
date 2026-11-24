@@ -83,8 +83,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-SPLIT_THRESHOLD_SEC = 6 * 3600   # only split streams longer than this
-SPLIT_PART_SEC = 3 * 3600        # ~3 hours per part
+SPLIT_THRESHOLD_SEC = 2 * 3600   # split streams longer than this
+SPLIT_PART_SEC = 1 * 3600        # ~1 hour per part
 
 
 def _paste_split(args, cfg, duration, platforms, portrait_style, credit) -> int:
