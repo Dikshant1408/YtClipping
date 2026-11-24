@@ -1,0 +1,9 @@
+# YtClipping dependencies
+# Core: AutoClip CLI binary + yt-dlp (used by autoclip internally)
+autoclip-mcp>=1.5.7
+yt-dlp>=2026.0.0
+
+# YouTube Data API v3 + OAuth (used by watcher/youtube.py for direct upload)
+google-auth>=2.0
+google-auth-oauthlib>=1.0
+google-api-python-client>=2.0

@@ -81,9 +81,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     state = State(args.state)
     try:
-        run_once(cfg, state, dry_run=args.dry_run)
+        result = run_once(cfg, state, dry_run=args.dry_run)
     except Exception as exc:  # noqa: BLE001
         log(f"ERROR: watcher cycle failed: {exc}")
+        return 1
+    if result.get("failed", 0) > 0:
         return 1
     return 0
 
@@ -100,7 +102,8 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
     if duration <= threshold:
         return 0  # handled by the non-split path
     parts = max(1, math.ceil(duration / part_sec))
-    log(f"[split] {duration/3600:.2f}h stream -> {parts} parts of ~{part_sec/3600:.0f}h")
+    max_section_attempts = max(1, cfg.max_attempts_per_video)
+    log(f"[split] {duration/3600:.2f}h stream -> {parts} parts of ~{part_sec/3600:.0f}h (max {max_section_attempts} attempts per part)")
 
     # Unique temp directory per job (no filename collisions).
     job_tmp = Path(tempfile.mkdtemp(prefix=f"ac_split_{video_id}_"))
@@ -122,6 +125,16 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
             total += sec.get("uploaded", 0)
             continue
 
+        # Bounded retries: skip sections that have exhausted download/produce attempts.
+        download_attempts = sec.get("download_attempts", 0)
+        produce_attempts = sec.get("produce_attempts", 0)
+        if sec.get("status") == "failed" and (
+            download_attempts >= max_section_attempts or produce_attempts >= max_section_attempts
+        ):
+            log(f"[split] part {i+1}/{parts}: max section attempts reached, skipping")
+            failed_parts.append(i + 1)
+            continue
+
         start = i * part_sec
         end = min((i + 1) * part_sec, duration)
         out = job_tmp / f"part_{i}.mp4"
@@ -131,7 +144,10 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
         except Exception as exc:  # noqa: BLE001
             log(f"[split] download part {i+1} failed: {exc}")
             failed_parts.append(i + 1)
-            section_progress[part_key] = {"status": "failed", "error": str(exc), "clips": {}, "uploaded": 0}
+            section_progress[part_key] = {
+                "status": "failed", "error": str(exc), "clips": {}, "uploaded": 0,
+                "download_attempts": download_attempts + 1, "produce_attempts": produce_attempts,
+            }
             _save_split_state(state, video_id, platforms, section_progress)
             continue
         srt = _cloud_srt(str(out), f"part {i+1}")
@@ -142,7 +158,10 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
             _safe_remove(str(out))
             log(f"[split] produce part {i+1} failed: {exc}")
             failed_parts.append(i + 1)
-            section_progress[part_key] = {"status": "failed", "error": str(exc), "clips": {}, "uploaded": 0}
+            section_progress[part_key] = {
+                "status": "failed", "error": str(exc), "clips": {}, "uploaded": 0,
+                "download_attempts": download_attempts, "produce_attempts": produce_attempts + 1,
+            }
             _save_split_state(state, video_id, platforms, section_progress)
             continue
         _safe_remove(srt)
@@ -152,7 +171,10 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
             cleanup_project(pid)
             _safe_remove(str(out))
             failed_parts.append(i + 1)
-            section_progress[part_key] = {"status": "failed", "error": data.get("error", "no clips"), "clips": {}, "uploaded": 0}
+            section_progress[part_key] = {
+                "status": "failed", "error": data.get("error", "no clips"), "clips": {}, "uploaded": 0,
+                "download_attempts": download_attempts, "produce_attempts": produce_attempts + 1,
+            }
             _save_split_state(state, video_id, platforms, section_progress)
             continue
         videos = yt.rendered_videos(data)[: max(1, args.clips)]
@@ -179,6 +201,11 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                 sec_clips[clip_key] = clip_track
                 continue
             clip_track["attempts"] += 1
+            # Persist incremented attempt BEFORE the API request (crash safety).
+            sec_clips[clip_key] = clip_track
+            section_progress[part_key] = {"status": sec.get("status", "processing"), "clips": sec_clips,
+                                          "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
+            _save_split_state(state, video_id, platforms, section_progress)
             try:
                 res = yt.upload_video(
                     v["path"],
@@ -325,6 +352,7 @@ def cmd_paste(args: argparse.Namespace) -> int:
 
     # Resume an existing produced/publishing/partially_published/failed job instead of re-producing.
     # Failed jobs are retried up to cfg.max_attempts_per_video times.
+    # A failed job with no saved clips means production never succeeded -> retry production.
     clips = None
     clip_ids = None
     project_id = None
@@ -339,6 +367,11 @@ def cmd_paste(args: argparse.Namespace) -> int:
             return 1
         log(f"       resuming saved job: project={project_id} clips={len(clip_ids)} status={existing_status} attempt={resume_attempts + 1}")
         resume_attempts += 1
+        if existing_status == "failed" and not clips:
+            clips = None
+            clip_ids = None
+            project_id = None
+            log("       previous production failed; retrying production")
     elif existing_status == "published":
         log("       already published, skipping")
         return 0
@@ -365,7 +398,7 @@ def cmd_paste(args: argparse.Namespace) -> int:
                 "resume_attempts": resume_attempts,
             })
             state.save()
-            return 0
+            return 1
 
         log(f"Produced {len(clips)} clip(s) (project {project_id}):")
         for c in clips:
@@ -407,9 +440,6 @@ def cmd_paste(args: argparse.Namespace) -> int:
             log(f"        crediting creator: {credit}")
         # rendered_videos needs clip paths; map clip ids to rendered videos by index.
         videos = yt.rendered_videos({"outputs": clips}) if clips else []
-        if not videos:
-            log("No rendered video files found to upload (project produced no outputs).")
-            return 0
         videos = videos[: max(1, args.clips)]
         # Align clip_ids with available rendered videos.
         clip_ids = [str(v.get("id", i)) for i, v in enumerate(videos)]
@@ -429,6 +459,20 @@ def cmd_paste(args: argparse.Namespace) -> int:
                     },
                 }
 
+        if not videos:
+            # Persist resume_attempts even when there are no rendered videos,
+            # so a failed upload attempt is counted on retry.
+            state.put(video_id, {
+                "status": "publishing", "project_id": project_id, "platforms": platforms,
+                "clips": clips, "selected_clip_ids": clip_ids, "clips_upload": {},
+                "published": [], "resume_attempts": resume_attempts,
+            })
+            state.save()
+            log("No rendered video files found to upload (project produced no outputs).")
+            return 1
+
+        # Persist resume_attempts BEFORE the first upload attempt so a crash
+        # during upload doesn't lose the attempt counter.
         state.put(video_id, {
             "status": "publishing", "project_id": project_id, "platforms": platforms,
             "clips": clips, "selected_clip_ids": clip_ids, "clips_upload": clips_upload,
@@ -452,6 +496,23 @@ def cmd_paste(args: argparse.Namespace) -> int:
                     failed.append(Path(v['path']).name)
                     continue
                 plat_track["attempts"] += 1
+
+                # Persist incremented attempt BEFORE the API request (crash safety).
+                clips_upload[cid]["platforms"][pub_plat] = plat_track
+                all_platforms = [publish_platform(p) for p in platforms]
+                all_statuses = [c2["platforms"].get(p, {}).get("status", "pending")
+                                for c2 in clips_upload.values() for p in all_platforms]
+                final_status = "published" if all(s == "published" for s in all_statuses) else \
+                    ("partially_published" if any(s == "published" for s in all_statuses) else "failed")
+                published_list = [c2["platforms"].get(p, {})
+                                  for c2 in clips_upload.values() for p in all_platforms
+                                  if c2["platforms"].get(p, {}).get("status") == "published"]
+                state.put(video_id, {
+                    "status": final_status, "project_id": project_id, "platforms": platforms,
+                    "clips": clips, "selected_clip_ids": clip_ids, "clips_upload": clips_upload,
+                    "published": published_list, "resume_attempts": resume_attempts,
+                })
+                state.save()
                 try:
                     res = yt.upload_video(
                         v["path"],

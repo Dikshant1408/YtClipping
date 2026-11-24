@@ -608,11 +608,12 @@ def run_once(cfg: Config, state: State, dry_run: bool = False) -> Dict[str, Any]
 
     if not cfg.channels:
         log("No channels configured. Add some to config.json (see config.example.json).")
-        return {"processed": 0, "skipped": 0}
+        return {"processed": 0, "skipped": 0, "failed": 0}
 
     log(f"[{_now()}] polling {len(cfg.channels)} channel(s)")
     processed = 0
     skipped = 0
+    failed = 0
 
     for ch in cfg.channels:
         if not ch.enabled:
@@ -626,12 +627,14 @@ def run_once(cfg: Config, state: State, dry_run: bool = False) -> Dict[str, Any]
             )
         except Exception as exc:  # noqa: BLE001
             log(f"- {ch.name or ch.id}: resolve failed: {exc}")
+            failed += 1
             continue
 
         try:
             entries = fetch_channel_entries(channel_id)
         except Exception as exc:  # noqa: BLE001
             log(f"- {ch.name or ch.id}: feed fetch failed: {exc}")
+            failed += 1
             continue
 
         new_entries = [e for e in entries if _should_process(state, e["video_id"], cfg)]
@@ -652,12 +655,15 @@ def run_once(cfg: Config, state: State, dry_run: bool = False) -> Dict[str, Any]
 
         log(f"- {ch.name or ch.id}: {len(new_entries)} new upload(s)")
         for entry in new_entries:
-            process_video(cfg, state, ch, entry, dry_run=dry_run)
-            processed += 1
+            rec = process_video(cfg, state, ch, entry, dry_run=dry_run)
+            if rec.get("status") == "failed":
+                failed += 1
+            else:
+                processed += 1
 
     state.save()
-    log(f"[{_now()}] cycle complete: processed={processed}")
-    return {"processed": processed, "skipped": skipped}
+    log(f"[{_now()}] cycle complete: processed={processed}, skipped={skipped}, failed={failed}")
+    return {"processed": processed, "skipped": skipped, "failed": failed}
 
 
 def _now() -> str:
