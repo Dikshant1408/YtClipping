@@ -179,11 +179,13 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                                                                                 "error": None})
                     if plat_track["status"] == "published":
                         continue
-                    # Reconciliation: if the last outcome was ambiguous (server may
-                    # have processed the upload), check YouTube before retrying.
-                    if plat_track["status"] == "upload_unknown":
-                        existing = _check_youtube_existing_upload(clip_track.get("title", f"Short {cid}"))
-                        if existing:
+                    # Reconciliation: only for YouTube platform — never for
+                    # TikTok, Instagram, etc. If the last outcome was ambiguous
+                    # (server may have processed the upload), check YouTube
+                    # before retrying.
+                    if plat_track["status"] == "upload_unknown" and pub_plat == "youtube":
+                        found, existing = _check_youtube_existing_upload(clip_track.get("title", f"Short {cid}"))
+                        if found is True and existing:
                             plat_track["status"] = "published"
                             plat_track["youtube_url"] = existing
                             plat_track["error"] = None
@@ -196,6 +198,23 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                                                                                  for p in all_platforms))}
                             _save_split_state(state, video_id, platforms, section_progress)
                             continue
+                        # found is False -> definitively not found -> treat as failed.
+                        # found is None -> error (OAuth, network) -> keep upload_unknown,
+                        # do not count as a definitive failure.
+                        if found is False:
+                            plat_track["status"] = "failed"
+                            plat_track["error"] = "no matching upload found on YouTube channel"
+                            log(f"[split] upload not found on YouTube for clip {cid} ({pub_plat})")
+                            clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                            section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": saved_project_id,
+                                                          "clip_ids": saved_clip_ids, "clips": sec_clips,
+                                                          "uploaded": sum(1 for c in sec_clips.values()
+                                                                          if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                                 for p in all_platforms))}
+                            _save_split_state(state, video_id, platforms, section_progress)
+                            continue
+                        # found is None -> reconciliation error, keep upload_unknown,
+                        # fall through to retry below.
                     if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
                         log(f"[split] part {i+1} clip {vi} ({cid}) -> {pub_plat}: max attempts reached, skipping")
                         part_failed = True
@@ -211,23 +230,33 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                                                                          for p in all_platforms))}
                     _save_split_state(state, video_id, platforms, section_progress)
                     try:
-                        res = yt.upload_video(
-                            clip_track["path"],
-                            title=clip_track.get("title", f"Short {cid}"),
-                            description=clip_track.get("description", ""),
-                            privacy=args.privacy,
-                            is_short=True,
-                            credit=credit,
-                            game=cfg.game,
-                            category_id=cfg.category_id,
-                            language=cfg.language,
-                            made_for_kids=cfg.made_for_kids,
-                        )
-                        plat_track["status"] = "published"
-                        plat_track["youtube_id"] = res.get("id")
-                        plat_track["youtube_url"] = res.get("url")
-                        plat_track["error"] = None
-                        log(f"[split] uploaded {res['url']} -> {pub_plat}")
+                        if pub_plat == "youtube":
+                            # Direct YouTube upload via OAuth (YouTube Data API v3).
+                            res = yt.upload_video(
+                                clip_track["path"],
+                                title=clip_track.get("title", f"Short {cid}"),
+                                description=clip_track.get("description", ""),
+                                privacy=args.privacy,
+                                is_short=True,
+                                credit=credit,
+                                game=cfg.game,
+                                category_id=cfg.category_id,
+                                language=cfg.language,
+                                made_for_kids=cfg.made_for_kids,
+                            )
+                            plat_track["status"] = "published"
+                            plat_track["youtube_id"] = res.get("id")
+                            plat_track["youtube_url"] = res.get("url")
+                            plat_track["error"] = None
+                            log(f"[split] uploaded {res['url']} -> {pub_plat}")
+                        else:
+                            # Upload-Post via autoclip CLI for non-YouTube platforms.
+                            res = publish(cfg, saved_project_id, cid, pub_plat)
+                            plat_track["status"] = "published"
+                            plat_track["youtube_id"] = res.get("id", res.get("video_id"))
+                            plat_track["youtube_url"] = res.get("url")
+                            plat_track["error"] = None
+                            log(f"[split] published clip {cid} -> {pub_plat}")
                     except Exception as exc:  # noqa: BLE001
                         part_failed = True
                         # Use upload_unknown for ambiguous failures (server may have
@@ -393,11 +422,13 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                                                                             "error": None})
                 if plat_track["status"] == "published":
                     continue
-                # Reconciliation: if the last outcome was ambiguous (server may
-                # have processed the upload), check YouTube before retrying.
-                if plat_track["status"] == "upload_unknown":
-                    existing = _check_youtube_existing_upload(v.get("title", f"Short {cid}"))
-                    if existing:
+                # Reconciliation: only for YouTube platform — never for
+                # TikTok, Instagram, etc. If the last outcome was ambiguous
+                # (server may have processed the upload), check YouTube
+                # before retrying.
+                if plat_track["status"] == "upload_unknown" and pub_plat == "youtube":
+                    found, existing = _check_youtube_existing_upload(v.get("title", f"Short {cid}"))
+                    if found is True and existing:
                         plat_track["status"] = "published"
                         plat_track["youtube_url"] = existing
                         plat_track["error"] = None
@@ -410,6 +441,23 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                                                                              for p in all_platforms))}
                         _save_split_state(state, video_id, platforms, section_progress)
                         continue
+                    # found is False -> definitively not found -> treat as failed.
+                    # found is None -> error (OAuth, network) -> keep upload_unknown,
+                    # do not count as a definitive failure.
+                    if found is False:
+                        plat_track["status"] = "failed"
+                        plat_track["error"] = "no matching upload found on YouTube channel"
+                        log(f"[split] upload not found on YouTube for {Path(v['path']).name} ({pub_plat})")
+                        clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                        section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
+                                                      "clip_ids": clip_ids, "clips": sec_clips,
+                                                      "uploaded": sum(1 for c in sec_clips.values()
+                                                                      if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                             for p in all_platforms))}
+                        _save_split_state(state, video_id, platforms, section_progress)
+                        continue
+                    # found is None -> reconciliation error, keep upload_unknown,
+                    # fall through to retry below.
                 if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
                     log(f"[split] part {i+1} clip {vi} ({cid}) -> {pub_plat}: max attempts reached, skipping")
                     part_failed = True
@@ -425,23 +473,33 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                                                                      for p in all_platforms))}
                 _save_split_state(state, video_id, platforms, section_progress)
                 try:
-                    res = yt.upload_video(
-                        v["path"],
-                        title=v["title"],
-                        description=v["description"],
-                        privacy=args.privacy,
-                        is_short=True,
-                        credit=credit,
-                        game=cfg.game,
-                        category_id=cfg.category_id,
-                        language=cfg.language,
-                        made_for_kids=cfg.made_for_kids,
-                    )
-                    plat_track["status"] = "published"
-                    plat_track["youtube_id"] = res.get("id")
-                    plat_track["youtube_url"] = res.get("url")
-                    plat_track["error"] = None
-                    log(f"[split] uploaded {res['url']} -> {pub_plat}")
+                    if pub_plat == "youtube":
+                        # Direct YouTube upload via OAuth (YouTube Data API v3).
+                        res = yt.upload_video(
+                            v["path"],
+                            title=v["title"],
+                            description=v["description"],
+                            privacy=args.privacy,
+                            is_short=True,
+                            credit=credit,
+                            game=cfg.game,
+                            category_id=cfg.category_id,
+                            language=cfg.language,
+                            made_for_kids=cfg.made_for_kids,
+                        )
+                        plat_track["status"] = "published"
+                        plat_track["youtube_id"] = res.get("id")
+                        plat_track["youtube_url"] = res.get("url")
+                        plat_track["error"] = None
+                        log(f"[split] uploaded {res['url']} -> {pub_plat}")
+                    else:
+                        # Upload-Post via autoclip CLI for non-YouTube platforms.
+                        res = publish(cfg, pid, cid, pub_plat)
+                        plat_track["status"] = "published"
+                        plat_track["youtube_id"] = res.get("id", res.get("video_id"))
+                        plat_track["youtube_url"] = res.get("url")
+                        plat_track["error"] = None
+                        log(f"[split] published clip {cid} -> {pub_plat}")
                 except Exception as exc:  # noqa: BLE001
                     part_failed = True
                     # Use upload_unknown for ambiguous failures (server may have
@@ -533,22 +591,34 @@ def _safe_remove(path: str | None) -> None:
         pass
 
 
-def _check_youtube_existing_upload(title: str) -> Optional[str]:
-    """Check YouTube for an existing upload matching `title`.
+def _check_youtube_existing_upload(title: str) -> tuple[Optional[bool], Optional[str]]:
+    """Check YouTube for an existing upload matching `title` on the
+    authenticated user's channel.
 
-    Returns a video URL if found, else None. Used for reconciliation after
-    ambiguous upload failures where the server may have processed the
-    upload but the response was lost.
+    Returns (found, url):
+      - (True, url)   -> found and owned by authenticated channel
+      - (False, None) -> definitively not found (checked, no match)
+      - (None, None)  -> error (OAuth, network, permissions) — can't determine
+
+    Only valid for YouTube platform — never call for TikTok, Instagram, etc.
     """
     try:
         from googleapiclient.discovery import build  # type: ignore
         from google.oauth2.credentials import Credentials  # type: ignore
 
-        token_path = Path("token.json")
-        if not token_path.exists():
-            return None
-        creds = Credentials.from_authorized_user_file(str(token_path), ["https://www.googleapis.com/auth/youtube.readonly"])
+        if not yt.TOKEN.exists():
+            return (None, None)
+        creds = Credentials.from_authorized_user_file(str(yt.TOKEN), yt.SCOPES)
         youtube = build("youtube", "v3", credentials=creds)
+
+        # Get the authenticated channel ID for ownership verification.
+        channels_resp = youtube.channels().list(part="id", mine=True).execute()
+        channel_items = channels_resp.get("items") or []
+        if not channel_items:
+            return (False, None)
+        auth_channel_id = channel_items[0]["id"]
+
+        # Search for the video by title.
         request = youtube.search().list(
             part="snippet",
             q=title,
@@ -557,12 +627,16 @@ def _check_youtube_existing_upload(title: str) -> Optional[str]:
         )
         response = request.execute()
         for item in response.get("items", []):
-            if item.get("snippet", {}).get("title", "").strip().lower() == title.strip().lower():
-                vid = item["id"]["videoId"]
-                return f"https://youtu.be/{vid}"
+            snippet = item.get("snippet", {})
+            if snippet.get("title", "").strip().lower() == title.strip().lower():
+                # Verify ownership — never trust a title match alone.
+                if snippet.get("channelId") == auth_channel_id:
+                    vid = item["id"]["videoId"]
+                    return (True, f"https://youtu.be/{vid}")
+        return (False, None)
     except Exception:  # noqa: BLE001
-        pass
-    return None
+        # OAuth invalid, network failure, API error, permissions — can't determine.
+        return (None, None)
 
 
 def _use_cloud_whisper() -> bool:
@@ -761,11 +835,12 @@ def cmd_paste(args: argparse.Namespace) -> int:
                 if plat_track["status"] == "published":
                     ok += 1
                     continue
-                # Reconciliation: if the last outcome was ambiguous (server may
+                # Reconciliation: only for YouTube platform — never for TikTok,
+                # Instagram, etc. If the last outcome was ambiguous (server may
                 # have processed the upload), check YouTube before retrying.
-                if plat_track["status"] == "upload_unknown":
-                    existing = _check_youtube_existing_upload(v.get("title", f"Short {cid}"))
-                    if existing:
+                if plat_track["status"] == "upload_unknown" and pub_plat == "youtube":
+                    found, existing = _check_youtube_existing_upload(v.get("title", f"Short {cid}"))
+                    if found is True and existing:
                         plat_track["status"] = "published"
                         plat_track["youtube_url"] = existing
                         plat_track["error"] = None
@@ -787,6 +862,32 @@ def cmd_paste(args: argparse.Namespace) -> int:
                         })
                         state.save()
                         continue
+                    # found is False -> definitively not found -> treat as failed.
+                    # found is None -> error (OAuth, network) -> keep upload_unknown,
+                    # do not count as a definitive failure.
+                    if found is False:
+                        plat_track["status"] = "failed"
+                        plat_track["error"] = "no matching upload found on YouTube channel"
+                        failed.append(Path(v['path']).name)
+                        log(f"Upload not found on YouTube for {Path(v['path']).name} ({pub_plat})")
+                        clips_upload[cid]["platforms"][pub_plat] = plat_track
+                        all_platforms = [publish_platform(p) for p in platforms]
+                        all_statuses = [c2["platforms"].get(p, {}).get("status", "pending")
+                                        for c2 in clips_upload.values() for p in all_platforms]
+                        final_status = "published" if all(s == "published" for s in all_statuses) else \
+                            ("partially_published" if any(s == "published" for s in all_statuses) else "failed")
+                        published_list = [c2["platforms"].get(p, {})
+                                          for c2 in clips_upload.values() for p in all_platforms
+                                          if c2["platforms"].get(p, {}).get("status") == "published"]
+                        state.put(video_id, {
+                            "status": final_status, "project_id": project_id, "platforms": platforms,
+                            "clips": clips, "selected_clip_ids": clip_ids, "clips_upload": clips_upload,
+                            "published": published_list, "resume_attempts": resume_attempts,
+                        })
+                        state.save()
+                        continue
+                    # found is None -> reconciliation error, keep upload_unknown,
+                    # fall through to retry below.
                 if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
                     log(f"       clip {cid} -> {pub_plat}: max attempts reached, skipping")
                     failed.append(Path(v['path']).name)
@@ -810,31 +911,42 @@ def cmd_paste(args: argparse.Namespace) -> int:
                 })
                 state.save()
                 try:
-                    res = yt.upload_video(
-                        v["path"],
-                        title=v["title"],
-                        description=v["description"],
-                        privacy=args.privacy,
-                        is_short=True,
-                        credit=credit,
-                        game=cfg.game,
-                        category_id=cfg.category_id,
-                        language=cfg.language,
-                        made_for_kids=cfg.made_for_kids,
-                    )
-                    plat_track["status"] = "published"
-                    plat_track["youtube_id"] = res.get("id")
-                    plat_track["youtube_url"] = res.get("url")
-                    plat_track["error"] = None
-                    ok += 1
-                    log(f"Uploaded -> {res['url']} ({res['privacy']})")
+                    if pub_plat == "youtube":
+                        # Direct YouTube upload via OAuth (YouTube Data API v3).
+                        res = yt.upload_video(
+                            v["path"],
+                            title=v["title"],
+                            description=v["description"],
+                            privacy=args.privacy,
+                            is_short=True,
+                            credit=credit,
+                            game=cfg.game,
+                            category_id=cfg.category_id,
+                            language=cfg.language,
+                            made_for_kids=cfg.made_for_kids,
+                        )
+                        plat_track["status"] = "published"
+                        plat_track["youtube_id"] = res.get("id")
+                        plat_track["youtube_url"] = res.get("url")
+                        plat_track["error"] = None
+                        ok += 1
+                        log(f"Uploaded -> {res['url']} ({res['privacy']})")
+                    else:
+                        # Upload-Post via autoclip CLI for non-YouTube platforms.
+                        res = publish(cfg, project_id, cid, pub_plat)
+                        plat_track["status"] = "published"
+                        plat_track["youtube_id"] = res.get("id", res.get("video_id"))
+                        plat_track["youtube_url"] = res.get("url")
+                        plat_track["error"] = None
+                        ok += 1
+                        log(f"Published clip {cid} -> {pub_plat}")
                 except Exception as exc:  # noqa: BLE001
                     # Use upload_unknown for ambiguous failures (server may have
                     # processed the upload but the response was lost).
                     plat_track["status"] = "upload_unknown"
                     plat_track["error"] = str(exc)
                     failed.append(Path(v['path']).name)
-                    log(f"Upload ambiguous for {Path(v['path']).name}: {exc}")
+                    log(f"Upload ambiguous for {Path(v['path']).name} ({pub_plat}): {exc}")
 
                 # Persist after EVERY upload attempt.
                 clips_upload[cid]["platforms"][pub_plat] = plat_track
