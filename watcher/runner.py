@@ -242,7 +242,7 @@ def publish(cfg: Config, project_id: str, clip_id: str, platform: str) -> Dict[s
         "--wait",
     ]
     log(f"  $ {' '.join(cmd)}")
-    proc = _run(cmd, cfg.produce_timeout_sec)
+    proc = _run(cmd, cfg.publish_timeout_sec)
     if proc.returncode != 0:
         raise RuntimeError(
             f"autoclip publish failed (exit {proc.returncode}).\n"
@@ -340,12 +340,13 @@ def _parse_iso(ts: str) -> Optional[datetime]:
 # Pipeline
 # --------------------------------------------------------------------------- #
 def _clip_upload_entry(platforms: List[str]) -> Dict[str, Any]:
-    """Create a fresh per-clip upload tracking entry."""
+    """Create a fresh per-clip upload tracking entry with normalized platform keys."""
+    normalized = [publish_platform(p) for p in platforms]
     return {
         "status": "pending",
         "platforms": {
             p: {"status": "pending", "youtube_id": None, "youtube_url": None, "error": None, "attempts": 0}
-            for p in platforms
+            for p in normalized
         },
     }
 
@@ -517,11 +518,33 @@ def process_video(
                     plat_track["error"] = str(exc)
                     log(f"       publish failed clip {cid} -> {pub_plat}: {exc}")
 
+                # Persist after EVERY upload attempt (Fix #2: no lost progress on crash)
                 clip_platforms[pub_plat] = plat_track
+                clip_track["platforms"] = clip_platforms
+                clip_track["status"] = _clip_final_status(clip_platforms)
+                clips_upload[cid_str] = clip_track
 
-            clip_track["platforms"] = clip_platforms
-            clip_track["status"] = _clip_final_status(clip_platforms)
-            clips_upload[cid_str] = clip_track
+                final_status = _video_final_status(clips_upload)
+                published_list = []
+                for c in clips_upload.values():
+                    for p in c.get("platforms", {}).values():
+                        if p["status"] == "published":
+                            published_list.append(p)
+
+                state.put(
+                    video_id,
+                    {
+                        "status": final_status,
+                        "project_id": project_id,
+                        "platforms": platforms,
+                        "clips": clips,
+                        "selected_clip_ids": clip_ids,
+                        "clips_upload": clips_upload,
+                        "published": published_list,
+                        "attempts": int(rec.get("attempts", 0)) + 1,
+                    },
+                )
+                state.save()
 
         # Determine overall video status
         final_status = _video_final_status(clips_upload)

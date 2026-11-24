@@ -35,6 +35,9 @@ class Config:
     split_threshold_sec: int = 6 * 3600   # split streams longer than this (README: 6h default)
     split_part_sec: int = 3 * 3600        # ~3 hours per part (README: ~3h default)
     game: str = ""                        # game/topic for upload metadata (empty = generic mode)
+    category_id: str = "20"               # YouTube category (20 = Gaming)
+    language: str = "en"                  # default language
+    made_for_kids: bool = False           # set per your content; never auto-assume
 
     def channel_platforms(self, ch: Channel) -> List[str]:
         return ch.platforms or [self.platform]
@@ -76,6 +79,9 @@ def load_config(path: str | Path) -> Config:
     cfg.split_threshold_sec = int(data.get("split_threshold_sec", cfg.split_threshold_sec))
     cfg.split_part_sec = int(data.get("split_part_sec", cfg.split_part_sec))
     cfg.game = str(data.get("game", cfg.game))
+    cfg.category_id = str(data.get("category_id", cfg.category_id))
+    cfg.language = str(data.get("language", cfg.language))
+    cfg.made_for_kids = bool(data.get("made_for_kids", cfg.made_for_kids))
 
     channels: List[Channel] = []
     for raw in data.get("channels", []):
@@ -115,6 +121,9 @@ def save_config(cfg: Config, path: str | Path) -> None:
         "split_threshold_sec": cfg.split_threshold_sec,
         "split_part_sec": cfg.split_part_sec,
         "game": cfg.game,
+        "category_id": cfg.category_id,
+        "language": cfg.language,
+        "made_for_kids": cfg.made_for_kids,
         "channels": [
             {
                 "id": c.id,

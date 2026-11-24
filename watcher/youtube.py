@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",  # needed for channel_name() lookup
 ]
 # Public API name for the quota-enabled endpoint.
 API_SERVICE_NAME = "youtube"
