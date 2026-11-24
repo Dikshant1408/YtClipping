@@ -15,7 +15,7 @@ paste URL ──► download ──► AutoClip (transcribe + analyze + render)
           ──► upload Shorts to your channel ──► delete local files
 ```
 
-**Version:** 1.0.0 · **License:** MIT
+**Version:** 1.1.1 · **License:** MIT
 
 ## Quick start (under 2 minutes)
 
@@ -41,7 +41,7 @@ python autoclip_watch.py paste "https://www.youtube.com/watch?v=YOUR_VIDEO"
 | **Disk usage** | Keeps all project data | Auto-deletes local files after upload |
 | **Clips per video** | Fixed default | Up to 10, above a quality threshold |
 | **Model** | Gemini (rate-limited free tier) | Gemini / Groq / OpenAI / local Ollama |
-| **OAuth scopes** | N/A | Least-privilege: `youtube.upload` only |
+| **OAuth scopes** | N/A | `youtube.upload` + `youtube.readonly` |
 | **Windows quirks** | Empty-stdout aborts, `%APPDATA%` bugs | Patched (fallback parse + plain data dir) |
 
 ## Features
@@ -118,7 +118,7 @@ non-zero exit code.
 ## One-time: connect your YouTube channel
 
 This project uploads straight to YouTube with the official API — no Upload-Post,
-no shared rate limit. OAuth requests only `youtube.upload` (least privilege).
+no shared rate limit. OAuth requests `youtube.upload` plus `youtube.readonly` (for channel name lookup).
 
 1. [Google Cloud Console](https://console.cloud.google.com/) → create/select a project.
 2. **APIs & Services → Library** → enable **YouTube Data API v3**.
