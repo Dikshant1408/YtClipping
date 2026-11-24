@@ -1,4 +1,4 @@
-"""Tests for YtClipping recovery & reliability fixes (v1.1.3).
+"""Tests for YtClipping recovery & reliability fixes (v1.1.4).
 
 Covers:
   - Resume failed jobs with empty clips (retry production, non-zero exit)
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from autoclip_watch import cmd_paste, cmd_run  # noqa: E402
+from autoclip_watch import cmd_paste, cmd_run, _check_youtube_existing_upload  # noqa: E402
 from watcher.runner import run_once  # noqa: E402
 from watcher.state import State  # noqa: E402
 
@@ -224,7 +224,7 @@ def test_multiple_platforms_direct_upload(tmp_path):
 
     args = Args(config=str(cfg_path), state=str(state_path),
                 url="https://www.youtube.com/watch?v=jkl012",
-                platform=None, no_publish=False, clips=5, privacy="unlisted")
+                platform="youtube,tiktok", no_publish=False, clips=5, privacy="unlisted")
 
     uploaded_platforms = []
     upload_call_count = {"n": 0}
@@ -243,8 +243,8 @@ def test_multiple_platforms_direct_upload(tmp_path):
         rc = cmd_paste(args)
 
     # Both platforms should have been attempted (2 upload calls for 1 clip x 2 platforms).
-    assert upload_call_count["n"] >= 1, \
-        f"expected >= 1 upload call, got {upload_call_count['n']}"
+    assert upload_call_count["n"] == 2, \
+        f"expected exactly 2 upload calls (1 clip x 2 platforms), got {upload_call_count['n']}"
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +306,8 @@ def test_clip_id_identity_preserved(tmp_path):
 # ---------------------------------------------------------------------------
 def test_split_partial_resume_from_saved_project(tmp_path):
     """A split section marked 'partial' should resume publishing from saved
-    project instead of re-downloading/re-producing."""
+    project instead of re-downloading/re-producing. Uses per-platform clip
+    tracking so partial platform uploads can resume correctly."""
     cfg_path = write_config(tmp_path, split_threshold_sec=1)  # force split path
     state_path = write_state(tmp_path, {
         "split_vid": {
@@ -322,11 +323,18 @@ def test_split_partial_resume_from_saved_project(tmp_path):
                         "0": {"status": "published", "attempts": 1, "clip_id": "clip_a",
                               "path": str(tmp_path / "clip_a.mp4"),
                               "title": "Clip A", "description": "",
-                              "youtube_id": "yt_a", "youtube_url": "https://youtu.be/yt_a", "error": None},
+                              "platforms": {
+                                  "youtube": {"status": "published", "youtube_id": "yt_a",
+                                              "youtube_url": "https://youtu.be/yt_a",
+                                              "error": None, "attempts": 1}
+                              }},
                         "1": {"status": "pending", "attempts": 0, "clip_id": "clip_b",
                               "path": str(tmp_path / "clip_b.mp4"),
                               "title": "Clip B", "description": "",
-                              "youtube_id": None, "youtube_url": None, "error": None},
+                              "platforms": {
+                                  "youtube": {"status": "pending", "youtube_id": None,
+                                              "youtube_url": None, "error": None, "attempts": 0}
+                              }},
                     },
                     "uploaded": 1,
                 }
@@ -374,7 +382,97 @@ def test_split_partial_resume_from_saved_project(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Test 8: run_once returns failed count; cmd_run non-zero on failures
+# Test 8: Split multi-platform upload (one succeeds, one fails)
+# ---------------------------------------------------------------------------
+def test_split_multiplatform_one_fails(tmp_path):
+    """A split section with multiple platforms should attempt upload to each
+    platform. When one platform fails, the other should still succeed and the
+    section should be marked partial."""
+    cfg_path = write_config(tmp_path, split_threshold_sec=1)
+    state_path = write_state(tmp_path, {
+        "split_vid": {
+            "status": "processing",
+            "project_id": "",
+            "platforms": ["youtube", "tiktok"],
+            "section_progress": {
+                "0": {
+                    "status": "partial",
+                    "project_id": "saved_proj_0",
+                    "clip_ids": ["clip_a"],
+                    "clips": {
+                        "0": {"status": "pending", "attempts": 0, "clip_id": "clip_a",
+                              "path": str(tmp_path / "clip_a.mp4"),
+                              "title": "Clip A", "description": "",
+                              "platforms": {
+                                  "youtube": {"status": "pending", "youtube_id": None,
+                                              "youtube_url": None, "error": None, "attempts": 0},
+                                  "tiktok": {"status": "pending", "youtube_id": None,
+                                             "youtube_url": None, "error": None, "attempts": 0},
+                              }},
+                    },
+                    "uploaded": 0,
+                }
+            },
+            "resume_attempts": 0,
+        }
+    })
+    (tmp_path / "clip_a.mp4").write_bytes(b"fake video a")
+
+    fake_secret = tmp_path / "client_secret.json"
+    fake_secret.write_text("{}")
+
+    args = Args(config=str(cfg_path), state=str(state_path),
+                url="https://www.youtube.com/watch?v=split_vid",
+                platform="youtube,tiktok", no_publish=False, clips=5, privacy="unlisted")
+
+    produce_called = False
+    import autoclip_watch as aw
+    real_produce = aw.produce
+
+    def tracking_produce(*a, **k):
+        nonlocal produce_called
+        produce_called = True
+        return real_produce(*a, **k)
+
+    upload_results = {"youtube": True, "tiktok": False}
+    upload_call_count = {"n": 0}
+
+    def fake_upload_video(*a, **k):
+        upload_call_count["n"] += 1
+        # Fail the 2nd upload call (tiktok for a single clip with 2 platforms).
+        if upload_call_count["n"] == 2:
+            raise RuntimeError("tiktok upload rejected")
+        return {"id": "vid-a", "url": "https://youtu.be/vid-a", "privacy": "unlisted"}
+
+    with patch("autoclip_watch.ch_mod.video_duration", return_value=1800), \
+         patch("autoclip_watch.yt.CLIENT_SECRET", fake_secret), \
+         patch("autoclip_watch.ch_mod.video_uploader", return_value=None), \
+         patch("autoclip_watch.produce", side_effect=tracking_produce), \
+         patch("autoclip_watch.yt.upload_video", side_effect=fake_upload_video), \
+         patch("autoclip_watch.cleanup_project"), \
+         patch("autoclip_watch._safe_remove"), \
+         patch("autoclip_watch.ch_mod.download_section"):
+        rc = cmd_paste(args)
+
+    assert not produce_called, "produce should NOT be called when resuming partial split section"
+    assert upload_call_count["n"] >= 1, f"expected >= 1 upload call, got {upload_call_count['n']}"
+    state = State(state_path)
+    rec = state.get("split_vid")
+    sec = rec.get("section_progress", {}).get("0", {})
+    clips = sec.get("clips", {})
+    clip_track = clips.get("0", {})
+    platforms = clip_track.get("platforms", {})
+    # YouTube should be published, tiktok should be failed
+    yt_status = platforms.get("youtube", {}).get("status")
+    tt_status = platforms.get("tiktok", {}).get("status")
+    assert yt_status == "published", f"youtube should be published, got {yt_status}"
+    assert tt_status == "upload_unknown", f"tiktok should be upload_unknown, got {tt_status}"
+    # Section should be partial since tiktok failed
+    assert sec.get("status") == "partial", f"section should be partial, got {sec.get('status')}"
+
+
+# ---------------------------------------------------------------------------
+# Test 9: run_once returns failed count; cmd_run non-zero on failures
 # ---------------------------------------------------------------------------
 def test_run_once_structured_result(tmp_path):
     cfg_path = write_config(tmp_path, channels=[])
@@ -464,8 +562,18 @@ def test_upload_attempt_persisted_before_request(tmp_path):
     assert any_track is not None, "should have at least one upload track"
     assert any_track.get("attempts", 0) >= 1, \
         f"attempts should be >= 1 (persisted before crash), got {any_track.get('attempts')}"
-    assert any_track.get("status") == "failed", \
-        f"status should be 'failed', got {any_track.get('status')}"
+    assert any_track.get("status") == "upload_unknown", \
+        f"status should be 'upload_unknown', got {any_track.get('status')}"
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Reconciliation returns None when no OAuth token exists
+# ---------------------------------------------------------------------------
+def test_check_youtube_existing_upload_no_token(tmp_path):
+    """_check_youtube_existing_upload should return None gracefully when
+    token.json is missing (no OAuth configured)."""
+    result = _check_youtube_existing_upload("Any Video Title")
+    assert result is None, f"expected None when no token, got {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -482,9 +590,11 @@ if __name__ == "__main__":
         ("test_multiple_platforms_direct_upload", test_multiple_platforms_direct_upload),
         ("test_clip_id_identity_preserved", test_clip_id_identity_preserved),
         ("test_split_partial_resume_from_saved_project", test_split_partial_resume_from_saved_project),
+        ("test_split_multiplatform_one_fails", test_split_multiplatform_one_fails),
         ("test_run_once_structured_result", test_run_once_structured_result),
         ("test_cmd_run_nonzero_on_failures", test_cmd_run_nonzero_on_failures),
         ("test_upload_attempt_persisted_before_request", test_upload_attempt_persisted_before_request),
+        ("test_check_youtube_existing_upload_no_token", test_check_youtube_existing_upload_no_token),
     ]
 
     passed = 0

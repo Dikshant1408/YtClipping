@@ -151,8 +151,16 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                 clip_key = str(vi)
                 clip_track = sec_clips.get(clip_key, {"status": "pending", "attempts": 0,
                                                        "clip_id": cid, "path": None,
-                                                       "youtube_id": None, "youtube_url": None, "error": None})
-                if clip_track["status"] == "published":
+                                                       "platforms": {
+                                                           publish_platform(p): {"status": "pending", "youtube_id": None,
+                                                                                 "youtube_url": None, "error": None, "attempts": 0}
+                                                           for p in platforms
+                                                       }})
+                # Skip clips already published on all platforms.
+                all_platforms = [publish_platform(p) for p in platforms]
+                plat_statuses = [clip_track.get("platforms", {}).get(p, {}).get("status", "pending")
+                                 for p in all_platforms]
+                if all(s == "published" for s in plat_statuses):
                     part_uploaded += 1
                     continue
                 if clip_track["attempts"] >= max(1, cfg.max_attempts_per_video):
@@ -165,60 +173,97 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                     part_failed = True
                     sec_clips[clip_key] = clip_track
                     continue
-                clip_track["attempts"] += 1
-                # Persist incremented attempt BEFORE the API request (crash safety).
-                sec_clips[clip_key] = clip_track
-                section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": saved_project_id,
-                                              "clip_ids": saved_clip_ids, "clips": sec_clips,
-                                              "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
-                _save_split_state(state, video_id, platforms, section_progress)
-                try:
-                    res = yt.upload_video(
-                        clip_track["path"],
-                        title=clip_track.get("title", f"Short {cid}"),
-                        description=clip_track.get("description", ""),
-                        privacy=args.privacy,
-                        is_short=True,
-                        credit=credit,
-                        game=cfg.game,
-                        category_id=cfg.category_id,
-                        language=cfg.language,
-                        made_for_kids=cfg.made_for_kids,
-                    )
-                    clip_track["status"] = "published"
-                    clip_track["youtube_id"] = res.get("id")
-                    clip_track["youtube_url"] = res.get("url")
-                    clip_track["error"] = None
-                    part_uploaded += 1
-                    log(f"[split] uploaded {res['url']}")
-                except Exception as exc:  # noqa: BLE001
-                    part_failed = True
-                    clip_track["status"] = "failed"
-                    clip_track["error"] = str(exc)
-                    log(f"[split] upload failed for clip {cid}: {exc}")
+                for pub_plat in all_platforms:
+                    plat_track = clip_track.get("platforms", {}).get(pub_plat, {"status": "pending", "attempts": 0,
+                                                                                "youtube_id": None, "youtube_url": None,
+                                                                                "error": None})
+                    if plat_track["status"] == "published":
+                        continue
+                    # Reconciliation: if the last outcome was ambiguous (server may
+                    # have processed the upload), check YouTube before retrying.
+                    if plat_track["status"] == "upload_unknown":
+                        existing = _check_youtube_existing_upload(clip_track.get("title", f"Short {cid}"))
+                        if existing:
+                            plat_track["status"] = "published"
+                            plat_track["youtube_url"] = existing
+                            plat_track["error"] = None
+                            log(f"[split] reconciled {cid} -> {pub_plat}: found existing upload {existing}")
+                            clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                            section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": saved_project_id,
+                                                          "clip_ids": saved_clip_ids, "clips": sec_clips,
+                                                          "uploaded": sum(1 for c in sec_clips.values()
+                                                                          if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                                 for p in all_platforms))}
+                            _save_split_state(state, video_id, platforms, section_progress)
+                            continue
+                    if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
+                        log(f"[split] part {i+1} clip {vi} ({cid}) -> {pub_plat}: max attempts reached, skipping")
+                        part_failed = True
+                        clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                        continue
+                    plat_track["attempts"] += 1
+                    # Persist incremented attempt BEFORE the API request (crash safety).
+                    clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                    section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": saved_project_id,
+                                                  "clip_ids": saved_clip_ids, "clips": sec_clips,
+                                                  "uploaded": sum(1 for c in sec_clips.values()
+                                                                  if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                         for p in all_platforms))}
+                    _save_split_state(state, video_id, platforms, section_progress)
+                    try:
+                        res = yt.upload_video(
+                            clip_track["path"],
+                            title=clip_track.get("title", f"Short {cid}"),
+                            description=clip_track.get("description", ""),
+                            privacy=args.privacy,
+                            is_short=True,
+                            credit=credit,
+                            game=cfg.game,
+                            category_id=cfg.category_id,
+                            language=cfg.language,
+                            made_for_kids=cfg.made_for_kids,
+                        )
+                        plat_track["status"] = "published"
+                        plat_track["youtube_id"] = res.get("id")
+                        plat_track["youtube_url"] = res.get("url")
+                        plat_track["error"] = None
+                        log(f"[split] uploaded {res['url']} -> {pub_plat}")
+                    except Exception as exc:  # noqa: BLE001
+                        part_failed = True
+                        # Use upload_unknown for ambiguous failures (server may have
+                        # processed the upload but the response was lost).
+                        plat_track["status"] = "upload_unknown"
+                        plat_track["error"] = str(exc)
+                        log(f"[split] upload ambiguous for clip {cid} -> {pub_plat}: {exc}")
+
+                    clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                    section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": saved_project_id,
+                                                  "clip_ids": saved_clip_ids, "clips": sec_clips,
+                                                  "uploaded": sum(1 for c in sec_clips.values()
+                                                                  if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                         for p in all_platforms))}
+                    _save_split_state(state, video_id, platforms, section_progress)
 
                 sec_clips[clip_key] = clip_track
-                section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": saved_project_id,
-                                              "clip_ids": saved_clip_ids, "clips": sec_clips,
-                                              "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
-                _save_split_state(state, video_id, platforms, section_progress)
 
             # Clean up the section source file if present.
             out = job_tmp / f"part_{i}.mp4"
             _safe_remove(str(out))
 
-            part_uploaded = sum(1 for c in sec_clips.values() if c["status"] == "published")
+            part_uploaded = sum(1 for c in sec_clips.values()
+                                if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                       for p in all_platforms))
             total += part_uploaded
 
             all_clips = [c for c in sec_clips.values()]
             if not all_clips:
                 section_status = "failed"
-            elif part_failed and part_uploaded == 0:
-                section_status = "failed"
+            elif part_uploaded == len(all_clips):
+                section_status = "done"
             elif part_failed:
                 section_status = "partial"
             else:
-                section_status = "done"
+                section_status = "failed"
             section_progress[part_key] = {
                 "status": section_status,
                 "project_id": saved_project_id,
@@ -228,6 +273,11 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                 "error": None if not part_failed else "some uploads failed",
             }
             _save_split_state(state, video_id, platforms, section_progress)
+
+            # Only cleanup the AutoClip project when every clip is published on every platform.
+            # Otherwise preserve rendered files for retry on the next run.
+            if section_status == "done":
+                cleanup_project(saved_project_id)
             if part_failed:
                 failed_parts.append(i + 1)
             continue
@@ -280,7 +330,7 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
         clip_ids = [str(c.get("id") or c.get("clip_id")) for c in all_clips]
         videos = yt.rendered_videos(data)[: max(1, args.clips)]
 
-        # Build clip tracks with stable clip_id + path mapping.
+        # Build clip tracks with stable clip_id + path mapping and per-platform status.
         sec_clips = {}
         for vi, v in enumerate(videos):
             cid = clip_ids[vi] if vi < len(clip_ids) else str(vi)
@@ -290,9 +340,14 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                 "path": v.get("path"),
                 "title": v.get("title", f"Short {cid}"),
                 "description": v.get("description", ""),
-                "youtube_id": None, "youtube_url": None, "error": None,
+                "platforms": {
+                    publish_platform(p): {"status": "pending", "youtube_id": None,
+                                          "youtube_url": None, "error": None, "attempts": 0}
+                    for p in platforms
+                },
             }
 
+        all_platforms = [publish_platform(p) for p in platforms]
         part_failed = False
         for vi, v in enumerate(videos):
             clip_key = str(vi)
@@ -301,18 +356,30 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                                                    "clip_id": cid, "path": v.get("path"),
                                                    "title": v.get("title", f"Short {cid}"),
                                                    "description": v.get("description", ""),
-                                                   "youtube_id": None, "youtube_url": None, "error": None})
-            # Skip already-published clips (per-clip resume).
-            if clip_track["status"] == "published":
+                                                   "platforms": {
+                                                       pub_plat: {"status": "pending", "youtube_id": None,
+                                                                 "youtube_url": None, "error": None, "attempts": 0}
+                                                       for pub_plat in all_platforms
+                                                   }})
+            # Skip clips already published on all platforms (per-clip resume).
+            plat_statuses = [clip_track.get("platforms", {}).get(p, {}).get("status", "pending")
+                             for p in all_platforms]
+            if all(s == "published" for s in plat_statuses):
                 continue
             if args.no_publish:
                 log(f"[split] (no-publish) rendered {Path(v['path']).name}")
                 clip_track["status"] = "published"
                 clip_track["attempts"] = 1
+                for pub_plat in all_platforms:
+                    clip_track.setdefault("platforms", {})[pub_plat] = {"status": "published", "attempts": 1,
+                                                                        "youtube_id": None, "youtube_url": None,
+                                                                        "error": None}
                 sec_clips[clip_key] = clip_track
                 section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
                                               "clip_ids": clip_ids, "clips": sec_clips,
-                                              "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
+                                              "uploaded": sum(1 for c in sec_clips.values()
+                                                              if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                     for p in all_platforms))}
                 _save_split_state(state, video_id, platforms, section_progress)
                 continue
             if clip_track["attempts"] >= max(1, cfg.max_attempts_per_video):
@@ -320,66 +387,108 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                 part_failed = True
                 sec_clips[clip_key] = clip_track
                 continue
-            clip_track["attempts"] += 1
-            # Persist incremented attempt BEFORE the API request (crash safety).
-            sec_clips[clip_key] = clip_track
-            section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
-                                          "clip_ids": clip_ids, "clips": sec_clips,
-                                          "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
-            _save_split_state(state, video_id, platforms, section_progress)
-            try:
-                res = yt.upload_video(
-                    v["path"],
-                    title=v["title"],
-                    description=v["description"],
-                    privacy=args.privacy,
-                    is_short=True,
-                    credit=credit,
-                    game=cfg.game,
-                    category_id=cfg.category_id,
-                    language=cfg.language,
-                    made_for_kids=cfg.made_for_kids,
-                )
-                clip_track["status"] = "published"
-                clip_track["youtube_id"] = res.get("id")
-                clip_track["youtube_url"] = res.get("url")
-                clip_track["error"] = None
-                log(f"[split] uploaded {res['url']}")
-            except Exception as exc:  # noqa: BLE001
-                part_failed = True
-                clip_track["status"] = "failed"
-                clip_track["error"] = str(exc)
-                log(f"[split] upload failed for {Path(v['path']).name}: {exc}")
+            for pub_plat in all_platforms:
+                plat_track = clip_track.get("platforms", {}).get(pub_plat, {"status": "pending", "attempts": 0,
+                                                                            "youtube_id": None, "youtube_url": None,
+                                                                            "error": None})
+                if plat_track["status"] == "published":
+                    continue
+                # Reconciliation: if the last outcome was ambiguous (server may
+                # have processed the upload), check YouTube before retrying.
+                if plat_track["status"] == "upload_unknown":
+                    existing = _check_youtube_existing_upload(v.get("title", f"Short {cid}"))
+                    if existing:
+                        plat_track["status"] = "published"
+                        plat_track["youtube_url"] = existing
+                        plat_track["error"] = None
+                        log(f"[split] reconciled {cid} -> {pub_plat}: found existing upload {existing}")
+                        clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                        section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
+                                                      "clip_ids": clip_ids, "clips": sec_clips,
+                                                      "uploaded": sum(1 for c in sec_clips.values()
+                                                                      if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                             for p in all_platforms))}
+                        _save_split_state(state, video_id, platforms, section_progress)
+                        continue
+                if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
+                    log(f"[split] part {i+1} clip {vi} ({cid}) -> {pub_plat}: max attempts reached, skipping")
+                    part_failed = True
+                    clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                    continue
+                plat_track["attempts"] += 1
+                # Persist incremented attempt BEFORE the API request (crash safety).
+                clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
+                                              "clip_ids": clip_ids, "clips": sec_clips,
+                                              "uploaded": sum(1 for c in sec_clips.values()
+                                                              if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                     for p in all_platforms))}
+                _save_split_state(state, video_id, platforms, section_progress)
+                try:
+                    res = yt.upload_video(
+                        v["path"],
+                        title=v["title"],
+                        description=v["description"],
+                        privacy=args.privacy,
+                        is_short=True,
+                        credit=credit,
+                        game=cfg.game,
+                        category_id=cfg.category_id,
+                        language=cfg.language,
+                        made_for_kids=cfg.made_for_kids,
+                    )
+                    plat_track["status"] = "published"
+                    plat_track["youtube_id"] = res.get("id")
+                    plat_track["youtube_url"] = res.get("url")
+                    plat_track["error"] = None
+                    log(f"[split] uploaded {res['url']} -> {pub_plat}")
+                except Exception as exc:  # noqa: BLE001
+                    part_failed = True
+                    # Use upload_unknown for ambiguous failures (server may have
+                    # processed the upload but the response was lost).
+                    plat_track["status"] = "upload_unknown"
+                    plat_track["error"] = str(exc)
+                    log(f"[split] upload ambiguous for {Path(v['path']).name} -> {pub_plat}: {exc}")
+
+                clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
+                                              "clip_ids": clip_ids, "clips": sec_clips,
+                                              "uploaded": sum(1 for c in sec_clips.values()
+                                                              if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                     for p in all_platforms))}
+                _save_split_state(state, video_id, platforms, section_progress)
 
             sec_clips[clip_key] = clip_track
-            section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
-                                          "clip_ids": clip_ids, "clips": sec_clips,
-                                          "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
-            _save_split_state(state, video_id, platforms, section_progress)
-        cleanup_project(pid)
+        # Only cleanup the AutoClip project when every clip is published on every platform.
+        # Otherwise preserve rendered files for retry on the next run.
+        section_uploaded = sum(1 for c in sec_clips.values()
+                               if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                      for p in all_platforms))
+        if section_uploaded == len(sec_clips) and sec_clips:
+            cleanup_project(pid)
         _safe_remove(str(out))
 
-        part_uploaded = sum(1 for c in sec_clips.values() if c["status"] == "published")
+        part_uploaded = section_uploaded
         total += part_uploaded
 
-        # Determine section status: done only if all clips published (or no_publish).
+        # Determine section status: done only if all clips published on all platforms.
         all_clips_tracked = [c for c in sec_clips.values()]
         if args.no_publish:
             section_status = "done"
         elif not all_clips_tracked:
             section_status = "failed"
-        elif part_failed and part_uploaded == 0:
-            section_status = "failed"
+        elif section_uploaded == len(all_clips_tracked):
+            section_status = "done"
         elif part_failed:
             section_status = "partial"
         else:
-            section_status = "done"
+            section_status = "failed"
         section_progress[part_key] = {
             "status": section_status,
             "project_id": pid,
             "clip_ids": clip_ids,
             "clips": sec_clips,
-            "uploaded": part_uploaded,
+            "uploaded": section_uploaded,
             "error": None if not part_failed else "some uploads failed",
         }
         _save_split_state(state, video_id, platforms, section_progress)
@@ -424,6 +533,38 @@ def _safe_remove(path: str | None) -> None:
         pass
 
 
+def _check_youtube_existing_upload(title: str) -> Optional[str]:
+    """Check YouTube for an existing upload matching `title`.
+
+    Returns a video URL if found, else None. Used for reconciliation after
+    ambiguous upload failures where the server may have processed the
+    upload but the response was lost.
+    """
+    try:
+        from googleapiclient.discovery import build  # type: ignore
+        from google.oauth2.credentials import Credentials  # type: ignore
+
+        token_path = Path("token.json")
+        if not token_path.exists():
+            return None
+        creds = Credentials.from_authorized_user_file(str(token_path), ["https://www.googleapis.com/auth/youtube.readonly"])
+        youtube = build("youtube", "v3", credentials=creds)
+        request = youtube.search().list(
+            part="snippet",
+            q=title,
+            type="video",
+            maxResults=5,
+        )
+        response = request.execute()
+        for item in response.get("items", []):
+            if item.get("snippet", {}).get("title", "").strip().lower() == title.strip().lower():
+                vid = item["id"]["videoId"]
+                return f"https://youtu.be/{vid}"
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _use_cloud_whisper() -> bool:
     """Use Groq cloud Whisper when configured (disable with USE_CLOUD_WHISPER=0)."""
     if os.environ.get("USE_CLOUD_WHISPER", "").lower() in ("0", "off", "false", "no"):
@@ -452,7 +593,7 @@ def cmd_paste(args: argparse.Namespace) -> int:
     """Paste a video link -> produce Shorts -> publish to your channel."""
     cfg = load_config(args.config)
     state = State(args.state)
-    platforms = [args.platform] if args.platform else [cfg.platform]
+    platforms = [p.strip() for p in args.platform.split(",")] if args.platform else [cfg.platform]
     portrait_style = args.portrait_style or cfg.portrait_style
 
     # Extract video id from URL for state tracking.
@@ -620,6 +761,32 @@ def cmd_paste(args: argparse.Namespace) -> int:
                 if plat_track["status"] == "published":
                     ok += 1
                     continue
+                # Reconciliation: if the last outcome was ambiguous (server may
+                # have processed the upload), check YouTube before retrying.
+                if plat_track["status"] == "upload_unknown":
+                    existing = _check_youtube_existing_upload(v.get("title", f"Short {cid}"))
+                    if existing:
+                        plat_track["status"] = "published"
+                        plat_track["youtube_url"] = existing
+                        plat_track["error"] = None
+                        ok += 1
+                        log(f"Uploaded (reconciled) -> {existing} ({pub_plat})")
+                        clips_upload[cid]["platforms"][pub_plat] = plat_track
+                        all_platforms = [publish_platform(p) for p in platforms]
+                        all_statuses = [c2["platforms"].get(p, {}).get("status", "pending")
+                                        for c2 in clips_upload.values() for p in all_platforms]
+                        final_status = "published" if all(s == "published" for s in all_statuses) else \
+                            ("partially_published" if any(s == "published" for s in all_statuses) else "failed")
+                        published_list = [c2["platforms"].get(p, {})
+                                          for c2 in clips_upload.values() for p in all_platforms
+                                          if c2["platforms"].get(p, {}).get("status") == "published"]
+                        state.put(video_id, {
+                            "status": final_status, "project_id": project_id, "platforms": platforms,
+                            "clips": clips, "selected_clip_ids": clip_ids, "clips_upload": clips_upload,
+                            "published": published_list, "resume_attempts": resume_attempts,
+                        })
+                        state.save()
+                        continue
                 if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
                     log(f"       clip {cid} -> {pub_plat}: max attempts reached, skipping")
                     failed.append(Path(v['path']).name)
@@ -662,10 +829,12 @@ def cmd_paste(args: argparse.Namespace) -> int:
                     ok += 1
                     log(f"Uploaded -> {res['url']} ({res['privacy']})")
                 except Exception as exc:  # noqa: BLE001
-                    plat_track["status"] = "failed"
+                    # Use upload_unknown for ambiguous failures (server may have
+                    # processed the upload but the response was lost).
+                    plat_track["status"] = "upload_unknown"
                     plat_track["error"] = str(exc)
                     failed.append(Path(v['path']).name)
-                    log(f"Upload failed for {Path(v['path']).name}: {exc}")
+                    log(f"Upload ambiguous for {Path(v['path']).name}: {exc}")
 
                 # Persist after EVERY upload attempt.
                 clips_upload[cid]["platforms"][pub_plat] = plat_track
@@ -717,10 +886,12 @@ def cmd_paste(args: argparse.Namespace) -> int:
                 published += 1
                 log(f"Published clip {cid} -> {pub_plat}")
             except Exception as exc:  # noqa: BLE001
-                plat_track["status"] = "failed"
+                # Use upload_unknown for ambiguous failures (server may have
+                # processed the upload but the response was lost).
+                plat_track["status"] = "upload_unknown"
                 plat_track["error"] = str(exc)
                 failed_uploads.append((cid, pub_plat))
-                log(f"Publish failed clip {cid} -> {pub_plat}: {exc}")
+                log(f"Publish ambiguous clip {cid} -> {pub_plat}: {exc}")
 
             # Persist after every publish attempt.
             clips_upload[cid]["platforms"][pub_plat] = plat_track

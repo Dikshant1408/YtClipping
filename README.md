@@ -15,7 +15,7 @@ paste URL ──► download ──► AutoClip (transcribe + analyze + render)
           ──► upload Shorts to your channel ──► delete local files
 ```
 
-**Version:** 1.1.3 · **License:** MIT
+**Version:** 1.1.4 · **License:** MIT
 
 ## Quick start (under 2 minutes)
 
