@@ -32,6 +32,9 @@ class Config:
     lookback_hours: int = 0
     extra_produce_args: List[str] = field(default_factory=list)
     max_attempts_per_video: int = 3
+    split_threshold_sec: int = 6 * 3600   # split streams longer than this (README: 6h default)
+    split_part_sec: int = 3 * 3600        # ~3 hours per part (README: ~3h default)
+    game: str = ""                        # game/topic for upload metadata (empty = generic mode)
 
     def channel_platforms(self, ch: Channel) -> List[str]:
         return ch.platforms or [self.platform]
@@ -70,6 +73,9 @@ def load_config(path: str | Path) -> Config:
     cfg.lookback_hours = int(data.get("lookback_hours", cfg.lookback_hours))
     cfg.extra_produce_args = list(data.get("extra_produce_args", []))
     cfg.max_attempts_per_video = int(data.get("max_attempts_per_video", cfg.max_attempts_per_video))
+    cfg.split_threshold_sec = int(data.get("split_threshold_sec", cfg.split_threshold_sec))
+    cfg.split_part_sec = int(data.get("split_part_sec", cfg.split_part_sec))
+    cfg.game = str(data.get("game", cfg.game))
 
     channels: List[Channel] = []
     for raw in data.get("channels", []):
@@ -106,6 +112,9 @@ def save_config(cfg: Config, path: str | Path) -> None:
         "lookback_hours": cfg.lookback_hours,
         "extra_produce_args": cfg.extra_produce_args,
         "max_attempts_per_video": cfg.max_attempts_per_video,
+        "split_threshold_sec": cfg.split_threshold_sec,
+        "split_part_sec": cfg.split_part_sec,
+        "game": cfg.game,
         "channels": [
             {
                 "id": c.id,

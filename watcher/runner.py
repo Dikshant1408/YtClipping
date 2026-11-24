@@ -339,6 +339,41 @@ def _parse_iso(ts: str) -> Optional[datetime]:
 # --------------------------------------------------------------------------- #
 # Pipeline
 # --------------------------------------------------------------------------- #
+def _clip_upload_entry(platforms: List[str]) -> Dict[str, Any]:
+    """Create a fresh per-clip upload tracking entry."""
+    return {
+        "status": "pending",
+        "platforms": {
+            p: {"status": "pending", "youtube_id": None, "youtube_url": None, "error": None, "attempts": 0}
+            for p in platforms
+        },
+    }
+
+
+def _clip_final_status(platforms_status: Dict[str, Any]) -> str:
+    """Determine clip-level status from per-platform results."""
+    statuses = [p.get("status", "pending") for p in platforms_status.values()]
+    if not statuses:
+        return "failed"
+    if all(s == "published" for s in statuses):
+        return "published"
+    if any(s in ("published", "partially_published") for s in statuses):
+        return "partially_published"
+    return "failed"
+
+
+def _video_final_status(clips_upload: Dict[str, Any]) -> str:
+    """Determine overall video status from per-clip results."""
+    statuses = [c.get("status", "pending") for c in clips_upload.values()]
+    if not statuses:
+        return "failed"
+    if all(s == "published" for s in statuses):
+        return "published"
+    if any(s in ("published", "partially_published") for s in statuses):
+        return "partially_published"
+    return "failed"
+
+
 def process_video(
     cfg: Config,
     state: State,
@@ -346,7 +381,16 @@ def process_video(
     entry: Dict[str, str],
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Produce (and optionally publish) clips for a single video entry."""
+    """Produce (and optionally publish) clips for a single video entry.
+
+    Status lifecycle:
+      unseen        -> produce -> produced
+      produced      -> publish -> publishing / partially_published / published / failed
+      publishing    -> retry failed uploads -> same set of outcomes
+      partially_published -> retry remaining -> same set of outcomes
+      published     -> skip (done)
+      failed        -> retry up to max_attempts_per_video
+    """
     video_id = entry["video_id"]
     url = entry.get("url") or f"https://www.youtube.com/watch?v={video_id}"
     platforms = cfg.channel_platforms(channel)
@@ -355,78 +399,184 @@ def process_video(
     log(f"[clip] {channel.name or channel.id} :: {entry.get('title', video_id)}")
     log(f"       {url}")
 
-    if state.has(video_id) and state.get(video_id, {}).get("status") == "done":
-        log("       already processed, skipping")
-        return state.get(video_id, {})
+    rec = state.get(video_id, {})
+    status = rec.get("status")
 
-    attempts = int(state.get(video_id, {}).get("attempts", 0))
-    state.update(
-        video_id,
-        channel_id=channel.id,
-        channel_name=channel.name,
-        title=entry.get("title", ""),
-        url=url,
-        published=entry.get("published", ""),
-        status="processing",
-    )
-    state.save()
+    # Already fully published -> skip
+    if status == "published":
+        log("       already published, skipping")
+        return rec
 
-    if dry_run:
-        log("       [dry-run] would run autoclip produce + publish, skipping")
-        state.update(video_id, status="pending", dry_run=True)
+    # Produce clips if not already produced (or resuming mid-publish)
+    if status not in ("produced", "publishing", "partially_published"):
+        attempts = int(rec.get("attempts", 0))
+        state.update(
+            video_id,
+            channel_id=channel.id,
+            channel_name=channel.name,
+            title=entry.get("title", ""),
+            url=url,
+            published=entry.get("published", ""),
+            status="processing",
+            attempts=attempts + 1,
+        )
         state.save()
-        return state.get(video_id, {})
 
-    try:
-        data = produce(cfg, url, platforms, cfg.portrait_style)
-    except Exception as exc:  # noqa: BLE001
-        log(f"       ERROR: {exc}")
-        state.update(video_id, status="failed", error=str(exc), attempts=attempts + 1)
-        state.save()
-        return state.get(video_id, {})
+        if dry_run:
+            log("       [dry-run] would run autoclip produce + publish, skipping")
+            state.update(video_id, status="pending", dry_run=True)
+            state.save()
+            return state.get(video_id, {})
 
-    project_id = data.get("project_id") or ""
-    clips = extract_clips(data)
-    clip_ids = top_clip_ids(clips, max_clips) if max_clips > 0 else []
+        try:
+            data = produce(cfg, url, platforms, cfg.portrait_style)
+        except Exception as exc:  # noqa: BLE001
+            log(f"       ERROR: {exc}")
+            state.update(video_id, status="failed", error=str(exc), attempts=attempts + 1)
+            state.save()
+            return state.get(video_id, {})
 
-    record: Dict[str, Any] = {
-        "status": "done",
-        "attempts": attempts + 1,
-        "project_id": project_id,
-        "platforms": platforms,
-        "clips": clips,
-        "selected_clip_ids": clip_ids,
-        "published": [],
-        "raw_summary": {
-            "ok": data.get("ok"),
-            "counts": data.get("counts"),
-        },
-    }
+        project_id = data.get("project_id") or ""
+        clips = extract_clips(data)
+        clip_ids = top_clip_ids(clips, max_clips) if max_clips > 0 else []
 
-    if cfg.auto_publish and project_id and clip_ids:
+        clips_upload: Dict[str, Any] = {}
         for cid in clip_ids:
+            clips_upload[str(cid)] = _clip_upload_entry(platforms)
+
+        state.put(
+            video_id,
+            {
+                "status": "produced",
+                "attempts": attempts + 1,
+                "project_id": project_id,
+                "platforms": platforms,
+                "clips": clips,
+                "selected_clip_ids": clip_ids,
+                "clips_upload": clips_upload,
+                "published": [],
+                "raw_summary": {"ok": data.get("ok"), "counts": data.get("counts")},
+            },
+        )
+        state.save()
+        log(f"       produced: project={project_id} clips={len(clip_ids)}")
+    else:
+        # Resume: load existing record
+        project_id = rec.get("project_id") or ""
+        clips = rec.get("clips", [])
+        clip_ids = rec.get("selected_clip_ids", [])
+        clips_upload = rec.get("clips_upload", {})
+        log(f"       resuming: project={project_id} clips={len(clip_ids)} status={status}")
+
+    if not clip_ids:
+        log("       no clip ids found; nothing to publish")
+        state.update(video_id, status="failed", error="no clip ids")
+        state.save()
+        return state.get(video_id, {})
+
+    # Publish clips (or retry failed ones)
+    if cfg.auto_publish and project_id:
+        state.update(video_id, status="publishing")
+        state.save()
+
+        published_count = 0
+        total_clips = len(clip_ids)
+
+        for cid in clip_ids:
+            cid_str = str(cid)
+            clip_track = clips_upload.get(cid_str, _clip_upload_entry(platforms))
+            clip_platforms = clip_track.get("platforms", {})
+
             for plat in platforms:
                 pub_plat = publish_platform(plat)
+                plat_track = clip_platforms.get(
+                    pub_plat, {"status": "pending", "youtube_id": None, "youtube_url": None, "error": None, "attempts": 0}
+                )
+
+                # Skip if already published on this platform
+                if plat_track["status"] == "published":
+                    published_count += 1
+                    continue
+
+                # Check attempt limit
+                if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
+                    log(f"       clip {cid} -> {pub_plat}: max attempts reached, skipping")
+                    continue
+
+                plat_track["attempts"] += 1
                 try:
                     res = publish(cfg, project_id, cid, pub_plat)
-                    record["published"].append(
-                        {"clip_id": cid, "platform": pub_plat, "result": res}
-                    )
-                    log(f"       published clip {cid} -> {pub_plat}")
+                    plat_track["status"] = "published"
+                    plat_track["youtube_id"] = res.get("id")
+                    plat_track["youtube_url"] = res.get("url")
+                    plat_track["error"] = None
+                    published_count += 1
+                    log(f"       published clip {cid} -> {pub_plat}: {res.get('url')}")
                 except Exception as exc:  # noqa: BLE001
+                    plat_track["status"] = "failed"
+                    plat_track["error"] = str(exc)
                     log(f"       publish failed clip {cid} -> {pub_plat}: {exc}")
-                    record["published"].append(
-                        {"clip_id": cid, "platform": pub_plat, "error": str(exc)}
-                    )
-    elif cfg.auto_publish and not clip_ids:
-        log("       auto_publish on but no clip ids found; skipping publish")
-    elif not cfg.auto_publish:
-        log(f"       auto_publish off; produced project {project_id} with {len(clip_ids)} clip(s)")
 
-    state.put(video_id, record)
-    state.save()
-    log(f"       done: project={project_id} clips={len(clips)} published={len(record['published'])}")
-    return record
+                clip_platforms[pub_plat] = plat_track
+
+            clip_track["platforms"] = clip_platforms
+            clip_track["status"] = _clip_final_status(clip_platforms)
+            clips_upload[cid_str] = clip_track
+
+        # Determine overall video status
+        final_status = _video_final_status(clips_upload)
+
+        published_list = []
+        for c in clips_upload.values():
+            for p in c.get("platforms", {}).values():
+                if p["status"] == "published":
+                    published_list.append(p)
+
+        state.put(
+            video_id,
+            {
+                "status": final_status,
+                "project_id": project_id,
+                "platforms": platforms,
+                "clips": clips,
+                "selected_clip_ids": clip_ids,
+                "clips_upload": clips_upload,
+                "published": published_list,
+                "attempts": int(rec.get("attempts", 0)) + 1,
+            },
+        )
+        state.save()
+        log(f"       {final_status}: project={project_id} published={published_count}/{total_clips}")
+    else:
+        log(f"       auto_publish off; produced project {project_id} with {len(clip_ids)} clip(s)")
+        state.update(video_id, status="produced")
+        state.save()
+
+    return state.get(video_id, {})
+
+
+def _should_process(state: State, video_id: str, cfg: Config) -> bool:
+    """Decide whether a video still needs processing.
+
+    - unseen                      -> process
+    - produced                    -> process (needs publishing)
+    - publishing                  -> process (retry failed uploads)
+    - partially_published         -> process (retry remaining uploads)
+    - pending (e.g. from dry-run) -> process
+    - published                   -> skip (fully done)
+    - failed                      -> retry up to max_attempts_per_video
+    - processing (stale/crashed)  -> retry up to max_attempts_per_video
+    """
+    rec = state.get(video_id)
+    if rec is None:
+        return True
+    status = rec.get("status")
+    if status == "published":
+        return False
+    attempts = int(rec.get("attempts", 0))
+    if status in ("failed", "processing", "publishing", "partially_published") and attempts >= max(1, cfg.max_attempts_per_video):
+        return False
+    return True
 
 
 def run_once(cfg: Config, state: State, dry_run: bool = False) -> Dict[str, Any]:
@@ -489,24 +639,3 @@ def run_once(cfg: Config, state: State, dry_run: bool = False) -> Dict[str, Any]
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-
-
-def _should_process(state: State, video_id: str, cfg: Config) -> bool:
-    """Decide whether a video still needs processing.
-
-    - unseen                      -> process
-    - done                        -> skip (already produced/published)
-    - pending (e.g. from dry-run) -> process
-    - failed                      -> retry up to max_attempts_per_video
-    - processing (stale/crashed)  -> retry up to max_attempts_per_video
-    """
-    rec = state.get(video_id)
-    if rec is None:
-        return True
-    status = rec.get("status")
-    if status == "done":
-        return False
-    attempts = int(rec.get("attempts", 0))
-    if status in ("failed", "processing") and attempts >= max(1, cfg.max_attempts_per_video):
-        return False
-    return True

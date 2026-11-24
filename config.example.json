@@ -9,6 +9,9 @@
   "produce_timeout_sec": 14400,
   "lookback_hours": 0,
   "max_attempts_per_video": 3,
+  "split_threshold_sec": 21600,
+  "split_part_sec": 10800,
+  "game": "",
   "extra_produce_args": [],
   "channels": [
     {

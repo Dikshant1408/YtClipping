@@ -22,7 +22,6 @@ from typing import Any, Dict, List, Optional
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
-    "https://www.googleapis.com/auth/youtube",  # full read/update (metadata edits, channel info)
 ]
 # Public API name for the quota-enabled endpoint.
 API_SERVICE_NAME = "youtube"
@@ -121,40 +120,46 @@ def _youtube_client():
     return build(API_SERVICE_NAME, API_VERSION, credentials=creds)
 
 
-_DEFAULT_TAGS = [
-    "gta 6", "gta vi", "gta6", "gtav", "gta", "grand theft auto 6",
-    "grand theft auto vi", "rockstar", "rockstar games", "vice city",
-    "gaming", "gaming shorts", "shorts", "gameplay", "highlights",
-    "funny moments", "gta 6 clips",
-]
+VALID_CATEGORY = {
+    "1": "Film & Animation",
+    "2": "Autos & Vehicles",
+    "10": "Music",
+    "15": "Pets & Animals",
+    "17": "Sports",
+    "19": "Travel & Events",
+    "20": "Gaming",
+    "21": "Videoblogging",
+    "22": "People & Blogs",
+    "23": "Comedy",
+    "24": "Entertainment",
+    "25": "News & Politics",
+    "26": "Howto & Style",
+    "27": "Education",
+    "28": "Science & Technology",
+    "29": "Nonprofits & Activism",
+}
 
-_GAME_HASHTAGS = "#gta6 #gtavi #gta6shorts #gaming #shorts #rockstargames #vicecity"
+_DEFAULT_TAGS: List[str] = []
+_DEFAULT_HASHTAGS = "#shorts"
 
 
-def _game_title(title: str, game: str) -> str:
-    """Ensure the game name is in the title."""
-    t = title.strip()
-    if not game or game.lower() in t.lower():
-        return t[:100]
-    return f"{game}: {t}"[:100]
-
-
-def _game_description(description: str, game: str, credit: Optional[str] = None) -> str:
+def _build_description(description: str, game: Optional[str], credit: Optional[str], hashtags: str) -> str:
     """Append game context + creator credit + hashtags to the description."""
-    if not game or "#gta6" in description.lower():
-        return description[:5000]
-    block = f"{game} (Grand Theft Auto VI) gameplay highlights."
+    block = ""
+    if game:
+        block += f"{game} gameplay highlights."
     if credit:
         block += f"\nCredit: {credit}"
-    block += f"\n\n{_GAME_HASHTAGS}"
-    return (description + "\n\n" + block)[:5000]
+    if hashtags:
+        block += f"\n\n{hashtags}"
+    return (description + "\n\n" + block).strip()[:5000] if block else description[:5000]
 
 
-def _auto_tags(title: str, description: str, extra: Optional[List[str]] = None) -> List[str]:
+def _auto_tags(title: str, description: str, default_tags: List[str], extra: Optional[List[str]] = None) -> List[str]:
     """Build a tag list from defaults + title/description words (<=500 chars)."""
     tags: List[str] = []
     words = [w.strip("#.,!?").lower() for w in (title + " " + description).split()]
-    for t in _DEFAULT_TAGS + words + (extra or []):
+    for t in default_tags + words + (extra or []):
         t = t.lower().strip()
         if t and len(t) > 2 and t not in tags:
             tags.append(t)
@@ -180,14 +185,15 @@ def upload_video(
     made_for_kids: bool = False,
     category_id: str = "20",   # 20 = Gaming
     language: str = "en",
-    game: str = "GTA 6",
+    game: Optional[str] = None,
     credit: Optional[str] = None,
+    default_tags: Optional[List[str]] = None,
+    hashtags: str = _DEFAULT_HASHTAGS,
 ) -> Dict[str, Any]:
     """Upload one video to the authenticated YouTube channel.
 
-    Fills in GTA 6-themed metadata: game-prefixed title, description with
-    hashtags, auto tags, Gaming category, language, license, embeddability,
-    and made-for-kids status. Returns a dict with the resulting id / url.
+    Uses configurable game/topic metadata (empty = generic mode, no game prefix).
+    Returns a dict with the resulting id / url.
     """
     from googleapiclient.http import MediaFileUpload
 
@@ -197,15 +203,20 @@ def upload_video(
     if privacy not in VALID_PRIVACY:
         raise ValueError(f"privacy must be one of {sorted(VALID_PRIVACY)}")
 
+    effective_tags = default_tags if default_tags is not None else _DEFAULT_TAGS
+
     if game:
-        title = _game_title(title, game)
-        description = _game_description(description, game, credit)
+        t = title.strip()
+        if game.lower() not in t.lower():
+            title = f"{game}: {t}"[:100]
+
+    description = _build_description(description, game, credit, hashtags)
 
     if is_short and "#shorts" not in title.lower() and "#shorts" not in description.lower():
-        description = (description + "\n\n#shorts").strip()
+        description = (description + "\n\n#shorts").strip()[:5000]
 
     if tags is None:
-        tags = _auto_tags(title, description)
+        tags = _auto_tags(title, description, effective_tags)
 
     body = {
         "snippet": {

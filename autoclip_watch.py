@@ -83,59 +83,82 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-SPLIT_THRESHOLD_SEC = 2 * 3600   # split streams longer than this
-SPLIT_PART_SEC = 1 * 3600        # ~1 hour per part
+def cmd_run(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    state = State(args.state)
+    run_once(cfg, state, dry_run=args.dry_run)
+    return 0
 
 
 def _paste_split(args, cfg, duration, platforms, portrait_style, credit) -> int:
-    """Process a very long stream in ~3h sections: download part -> produce -> upload -> cleanup."""
-    parts = max(1, math.ceil(duration / SPLIT_PART_SEC))
-    log(f"[split] {duration/3600:.2f}h stream -> {parts} parts of ~3h")
+    """Process a very long stream in sections: download part -> produce -> upload -> cleanup."""
+    threshold = cfg.split_threshold_sec
+    part_sec = cfg.split_part_sec
+    if duration <= threshold:
+        return 0  # handled by the non-split path
+    parts = max(1, math.ceil(duration / part_sec))
+    log(f"[split] {duration/3600:.2f}h stream -> {parts} parts of ~{part_sec/3600:.0f}h")
     total = 0
+    failed_parts = []
     for i in range(parts):
-        start = i * SPLIT_PART_SEC
-        end = min((i + 1) * SPLIT_PART_SEC, duration)
+        start = i * part_sec
+        end = min((i + 1) * part_sec, duration)
         out = os.path.join(tempfile.gettempdir(), f"ac_part_{i}.mp4")
         log(f"[split] part {i+1}/{parts}: {start/3600:.2f}h - {end/3600:.2f}h")
         try:
             ch_mod.download_section(args.url, start, end, out)
         except Exception as exc:  # noqa: BLE001
             log(f"[split] download part {i+1} failed: {exc}")
+            failed_parts.append(i + 1)
             continue
         srt = _cloud_srt(out, f"part {i+1}")
         try:
             data = produce(cfg, out, platforms, portrait_style, srt_path=srt)
         except Exception as exc:  # noqa: BLE001
-            log(f"[split] produce part {i+1} failed: {exc}")
+            _safe_remove(srt)
             _safe_remove(out)
+            log(f"[split] produce part {i+1} failed: {exc}")
+            failed_parts.append(i + 1)
             continue
+        _safe_remove(srt)
         pid = data.get("project_id") or ""
         if data.get("status") not in ("completed", "partial"):
             log(f"[split] part {i+1}: no clips ({data.get('error')})")
             cleanup_project(pid)
             _safe_remove(out)
+            failed_parts.append(i + 1)
             continue
         videos = yt.rendered_videos(data)[: max(1, args.clips)]
+        part_ok = 0
         for v in videos:
             if args.no_publish:
                 log(f"[split] (no-publish) rendered {Path(v['path']).name}")
+                part_ok += 1
                 continue
             try:
                 res = yt.upload_video(
                     v["path"], title=v["title"], description=v["description"],
-                    privacy=args.privacy, is_short=True, credit=credit,
+                    privacy=args.privacy, is_short=True, credit=credit, game=cfg.game,
                 )
                 total += 1
+                part_ok += 1
                 log(f"[split] uploaded {res['url']}")
             except Exception as exc:  # noqa: BLE001
                 log(f"[split] upload failed: {exc}")
         cleanup_project(pid)
         _safe_remove(out)
+        if part_ok == 0:
+            failed_parts.append(i + 1)
+    if failed_parts:
+        log(f"[split] WARNING: {len(failed_parts)} part(s) failed: {failed_parts}")
+        return 1
     log(f"[split] done. uploaded {total} Shorts from {parts} part(s)")
     return 0
 
 
-def _safe_remove(path: str) -> None:
+def _safe_remove(path: str | None) -> None:
+    if path is None:
+        return
     try:
         os.remove(path)
     except OSError:
@@ -175,10 +198,10 @@ def cmd_paste(args: argparse.Namespace) -> int:
     log(f"[paste] {args.url}")
     log(f"        platforms={platforms} style={portrait_style} publish={not args.no_publish}")
 
-    # Long streams (>6h) are split into ~3h sections and processed part by part.
+    # Long streams are split into sections and processed part by part.
     if not args.no_publish:
         duration = ch_mod.video_duration(args.url)
-        if duration and duration > SPLIT_THRESHOLD_SEC:
+        if duration and duration > cfg.split_threshold_sec:
             credit = ch_mod.video_uploader(args.url)
             return _paste_split(args, cfg, duration, platforms, portrait_style, credit)
 
@@ -186,8 +209,10 @@ def cmd_paste(args: argparse.Namespace) -> int:
     try:
         data = produce(cfg, args.url, platforms, portrait_style, srt_path=srt_path)
     except Exception as exc:  # noqa: BLE001
+        _safe_remove(srt_path)
         log(f"ERROR: produce failed: {exc}")
         return 1
+    _safe_remove(srt_path)
 
     project_id = data.get("project_id") or ""
     clips = extract_clips(data)
@@ -216,6 +241,7 @@ def cmd_paste(args: argparse.Namespace) -> int:
             return 0
         videos = videos[: max(1, args.clips)]
         ok = 0
+        failed = []
         for v in videos:
             try:
                 res = yt.upload_video(
@@ -225,16 +251,18 @@ def cmd_paste(args: argparse.Namespace) -> int:
                     privacy=args.privacy,
                     is_short=True,
                     credit=credit,
+                    game=cfg.game,
                 )
                 ok += 1
                 log(f"Uploaded -> {res['url']} ({res['privacy']})")
             except Exception as exc:  # noqa: BLE001
+                failed.append(Path(v['path']).name)
                 log(f"Upload failed for {Path(v['path']).name}: {exc}")
         log(f"Done. Uploaded {ok}/{len(videos)} video(s) to YouTube. project_id={project_id}")
-        if ok == len(videos):
-            cleanup_project(project_id)  # free disk once everything is safely uploaded
-        else:
-            log("Some uploads failed; keeping project data for retry.")
+        if failed:
+            log(f"WARNING: {len(failed)} upload(s) failed: {failed}")
+            return 1
+        cleanup_project(project_id)  # free disk once everything is safely uploaded
         return 0
 
     clip_ids = top_clip_ids(clips, args.clips)
@@ -243,6 +271,7 @@ def cmd_paste(args: argparse.Namespace) -> int:
         return 0
 
     published = 0
+    failed_uploads = []
     for cid in clip_ids:
         for plat in platforms:
             pub_plat = publish_platform(plat)
@@ -251,8 +280,12 @@ def cmd_paste(args: argparse.Namespace) -> int:
                 published += 1
                 log(f"Published clip {cid} -> {pub_plat}")
             except Exception as exc:  # noqa: BLE001
+                failed_uploads.append((cid, pub_plat))
                 log(f"Publish failed clip {cid} -> {pub_plat}: {exc}")
     log(f"Done. Published {published} clip(s). project_id={project_id}")
+    if failed_uploads:
+        log(f"WARNING: {len(failed_uploads)} publish(s) failed: {failed_uploads}")
+        return 1
     return 0
 
 
