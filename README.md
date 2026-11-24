@@ -1,14 +1,14 @@
 # YtClipping — Turn long videos into Shorts, auto-post to your channel
 
-![Demo](demo.gif)
-
 Paste a YouTube link to one of **your own** long videos, streams, podcasts, or
 lectures and get ready-to-post vertical **Shorts** on your own channel — in one
 command.
 
-YtClipping is an automation layer on top of [AutoClip](https://github.com/zhouxiaoka/autoclip)
-(clipping + rendering) that adds a **direct YouTube uploader**, topic-aware
-metadata, creator credits, and long-stream auto-splitting.
+YtClipping is an automation layer on top of
+[AutoClip](https://github.com/zhouxiaoka/autoclip) (clipping + rendering) that
+adds a **direct YouTube uploader**, topic-aware metadata, creator credits,
+long-stream auto-splitting, upload retry/recovery, and per-clip publishing
+tracking.
 
 ```
 paste URL ──► download ──► AutoClip (transcribe + analyze + render)
@@ -23,7 +23,7 @@ paste URL ──► download ──► AutoClip (transcribe + analyze + render)
 git clone https://github.com/Dikshant1408/YtClipping.git
 cd YtClipping
 pip install autoclip-mcp google-api-python-client google-auth-oauthlib
-copy .env.example .env          # paste a Groq key into API_OPENAI_API_KEY
+copy .env.example .env          # add your model API key (Gemini/Groq/OpenAI)
 python autoclip_watch.py youtube-login
 python autoclip_watch.py paste "https://www.youtube.com/watch?v=YOUR_VIDEO"
 ```
@@ -32,14 +32,16 @@ python autoclip_watch.py paste "https://www.youtube.com/watch?v=YOUR_VIDEO"
 
 | Feature | Original AutoClip | YtClipping |
 |---------|-------------------|------------|
-| **Uploads to your channel** | Manual export or Upload-Post setup | One command, direct YouTube API (no third-party) |
-| **Topic-aware metadata** | Generic title/description | Auto title, description, tags, category (GTA 6 by default, configurable) |
+| **Uploads to your channel** | Manual export or Upload-Post setup | One command, direct YouTube Data API (no third-party) |
+| **Upload retry & recovery** | None | Per-clip upload tracking; failed uploads auto-retry |
+| **Topic-aware metadata** | Generic title/description | Auto title, description, tags, category (configurable game/topic) |
 | **Creator credit** | Not included | Auto-fetches the source channel + `Credit:` line |
 | **AutoClip outro** | Forced 1.8s end-card | Removed |
-| **Long videos (>6h)** | Single huge download | Auto-splits into ~3h parts, one at a time |
+| **Long videos** | Single huge download | Auto-splits long streams into sections, one at a time |
 | **Disk usage** | Keeps all project data | Auto-deletes local files after upload |
 | **Clips per video** | Fixed default | Up to 10, above a quality threshold |
-| **Model** | Gemini (rate-limited free tier) | Groq / Gemini / OpenAI / local Ollama |
+| **Model** | Gemini (rate-limited free tier) | Gemini / Groq / OpenAI / local Ollama |
+| **OAuth scopes** | N/A | Least-privilege: `youtube.upload` only |
 | **Windows quirks** | Empty-stdout aborts, `%APPDATA%` bugs | Patched (fallback parse + plain data dir) |
 
 ## Features
@@ -48,28 +50,27 @@ python autoclip_watch.py paste "https://www.youtube.com/watch?v=YOUR_VIDEO"
 - **Direct YouTube upload** via the official YouTube Data API (your own Google
   OAuth — no Upload-Post, no shared rate limit). Falls back to Upload-Post if
   `client_secret.json` is absent.
+- **Upload retry & recovery** — per-clip upload status tracking
+  (`pending` / `published` / `failed`). Failed uploads retry automatically on the
+  next cycle; successfully published clips are never re-uploaded.
 - **Accurate cloud transcription** — Groq Whisper (`whisper-large-v3`) transcribes
-  multilingual audio (Hindi/English) cleanly, fixing the local-Whisper quality
-  that breaks clip validation. Falls back to AutoClip's local transcription if
-  Groq isn't configured (`USE_CLOUD_WHISPER=0` disables it).
-- **Streamer-friendly subtitle layout** — streamer speech subtitles at the **top**,
-  title card at the **bottom** (so they don't cover game subtitles). Also sets
-  Shorts-friendly clip durations (30–90s) so short highlights qualify. Enable with
-  `python -m watcher.patch_layout` (patches the installed AutoClip; re-run after
-  upgrading AutoClip).
+  multilingual audio (Hindi/English) cleanly. Falls back to AutoClip's local
+  transcription if Groq isn't configured (`USE_CLOUD_WHISPER=0` disables it).
 - **Hinglish / Roman subtitles** — Hindi speech is transliterated to Latin script
   (e.g. `aja main GTA 6 khela raha hun`) so English/Hinglish viewers can read it,
   instead of Devanagari. Set `TRANSCRIBE_SCRIPT=devanagari` in `.env` for Hindi
-  script, or `roman` (default) for Hinglish. English words like "GTA" are preserved.
-- **Topic-aware metadata, automatically:** title, description with hashtags,
-  auto tags, category, language, license, embeddability, made-for-kids. GTA 6 is
-  the built-in default (it's what this repo was built around); it's configurable.
+  script, or `roman` (default) for Hinglish.
+- **Configurable metadata** — game/topic, tags, hashtags, category, language,
+  made-for-kids are all configurable via `config.json` and `.env`. No hardcoded
+  GTA 6 defaults.
 - **Creator credit** — fetches the source channel via yt-dlp and adds
   `Credit: <creator>`.
 - **No AutoClip outro** — branding end-card disabled.
 - **Up to 10 clips per video** (configurable), only above a quality threshold.
-- **Long-video auto-splitter** — videos **> 6h** are downloaded in ~3h sections,
-  processed part-by-part, and uploaded; you never download the whole file at once.
+- **Long-video auto-splitter** — videos longer than the split threshold
+  (default 6h) are split into sections (default ~3h each), processed and uploaded
+  part-by-part; you never download the whole file at once. Failed sections are
+  retried and the job returns a non-zero exit code if incomplete.
 - **Auto-cleanup** — local project data (video + renders) is deleted after a
   successful upload to save disk.
 - **Flexible model** — Groq (free/fast), Gemini, OpenAI-compatible, or local Ollama.
@@ -81,30 +82,35 @@ For every Short, the tool sets:
 
 | Field | Value |
 |-------|-------|
-| Title | `<game/topic>: <clip hook>` |
+| Title | `<game/topic>: <clip hook>` (game prefix only when configured) |
 | Description | original + topic context + `Credit: <creator>` + hashtags |
-| Tags | game/topic + `gameplay`, `highlights`, … (auto) |
-| Category | Gaming (20) by default |
-| Language | English |
+| Tags | game/topic + auto-extracted words (≤500 chars total) |
+| Category | configurable (Gaming / 20 by default) |
+| Language | English (configurable) |
 | License / embedding | Standard YouTube License / allowed |
-| Made for kids | No |
+| Made for kids | configurable (declare per your content) |
 | Outro | none (AutoClip branding disabled) |
+
+> **Made for kids:** This is not automatically set. Declare it correctly for
+> each video in `config.json` or per-upload.
 
 A few Studio-only fields (age restriction, paid promotion, AI-use disclosure,
 comments, Shorts remixing) can't be set via the API and keep YouTube defaults.
 
-## Long videos (> 6h)
+## Long videos (auto-split)
 
-Videos longer than 6 hours are split into ~3h sections automatically. Each
-section is downloaded with `yt-dlp --download-sections`, processed, uploaded, and
-cleaned up independently:
+Videos longer than `split_threshold_sec` (default: 6 hours) are split into
+sections of `split_part_sec` (default: ~3 hours) automatically. Each section is
+downloaded, processed, uploaded, and cleaned up independently:
 
 ```bash
-python autoclip_watch.py paste "https://www.youtube.com/watch?v=6_HOUR_STREAM"
+python autoclip_watch.py paste "https://www.youtube.com/watch?v=LONG_STREAM"
 # -> downloads 0-3h, 3-6h, ... one at a time; uploads Shorts from all parts
 ```
 
-Videos ≤ 6h are processed as a single file.
+Videos at or below the threshold are processed as a single file. Failed sections
+are retried; if any section fails after max retries, the command returns a
+non-zero exit code.
 
 **Typical end-to-end time:** ~1–1.75h for a 3h video, ~1.5–2.5h for a 4h video
 (transcription is the bottleneck; local Whisper or Groq cloud Whisper).
@@ -112,7 +118,7 @@ Videos ≤ 6h are processed as a single file.
 ## One-time: connect your YouTube channel
 
 This project uploads straight to YouTube with the official API — no Upload-Post,
-no shared rate limit.
+no shared rate limit. OAuth requests only `youtube.upload` (least privilege).
 
 1. [Google Cloud Console](https://console.cloud.google.com/) → create/select a project.
 2. **APIs & Services → Library** → enable **YouTube Data API v3**.
@@ -126,21 +132,23 @@ no shared rate limit.
    Approve → `token.json` is saved. It prints your channel name.
 
 > Upload-Post is still supported as a fallback: if `client_secret.json` is absent,
-> `paste` uses AutoClip's publish path with `UPLOAD_POST_API_KEY` / `UPLOAD_POST_USER`.
+> `paste` uses AutoClip's publish path with `UPLOAD_POST_API_KEY` /
+> `UPLOAD_POST_USER`.
 
 ## Model config (`.env`)
 
-Copy `.env.example` → `.env`. Groq (recommended, free):
+Copy `.env.example` → `.env`. Gemini (recommended, 1M context, high free tier):
 
 ```ini
 LLM_PROVIDER=openai
-OPENAI_BASE_URL=https://api.groq.com/openai/v1
-API_OPENAI_API_KEY=gsk_...
-API_MODEL_NAME=qwen/qwen3.8-27b
-API_MAX_TOKENS=4096
+OPENAI_BASE_URL=https://googleapis.com
+API_OPENAI_API_KEY=AIzaSy_YOUR_GEMINI_KEY
+API_MODEL_NAME=gemini-2.5-flash
+API_MAX_TOKENS=8192
+USE_CLOUD_WHISPER=0
 ```
 
-Other providers: Gemini, OpenAI, DeepSeek, Kimi, GLM, or local Ollama/LM Studio
+Other providers: Groq, OpenAI, DeepSeek, Kimi, GLM, or local Ollama/LM Studio
 (see `.env.example`).
 
 > **Windows data-dir note.** Point AutoClip at a plain local dir without spaces:
@@ -170,6 +178,7 @@ python autoclip_watch.py reset           # clear processed-video state
 python autoclip_watch.py youtube-login   # one-time YouTube OAuth
 python autoclip_watch.py resolve <url>   # channel URL/handle -> UC id
 python autoclip_watch.py add-channel <url>
+python autoclip_watch.py upload <file>   # upload a local video file
 ```
 
 `paste` options: `--clips N` (default 10), `--privacy private|unlisted|public`,
@@ -187,20 +196,35 @@ python autoclip_watch.py add-channel <url>
 | `max_videos_per_channel` | `5` | Cap new uploads per channel per cycle. |
 | `autoclip_bin` | `autoclip` | Path/name of the AutoClip CLI. |
 | `produce_timeout_sec` | `14400` | Timeout per produce call (4h; covers long videos). |
-| `max_attempts_per_video` | `3` | Retries before giving up. |
+| `publish_timeout_sec` | `120` | Timeout per publish call. |
+| `lookback_hours` | `0` | Only process uploads from the last N hours. |
 | `extra_produce_args` | `[]` | Extra flags passed to `autoclip produce`. |
-| `channels[]` | — | Watched channels (see below). |
+| `max_attempts_per_video` | `3` | Retries before giving up (produce + publish). |
+| `split_threshold_sec` | `21600` | Split streams longer than this (6h default). |
+| `split_part_sec` | `10800` | Section length for split streams (3h default). |
+| `game` | `""` | Game/topic for upload metadata (empty = generic mode). |
 
-Per-channel overrides: `{ "id": "@Handle", "name": "...", "enabled": true, "platforms": ["youtube_shorts"], "max_clips": 0 }`.
+Per-channel overrides:
+`{ "id": "@Handle", "name": "...", "enabled": true, "platforms": ["youtube_shorts"], "max_clips": 0 }`.
 
 ## How it works
 
 1. **Resolve** — handle/URL → channel id (yt-dlp).
-2. **Download** — yt-dlp (whole video ≤6h, or ~3h sections for >6h).
+2. **Download** — yt-dlp (whole video, or sections for long streams).
 3. **Produce** — `autoclip produce` transcribes, analyzes with your model, renders Shorts.
 4. **Enrich** — topic-aware title/description/tags, creator credit.
-5. **Upload** — YouTube Data API (direct) or Upload-Post.
+5. **Upload** — YouTube Data API (direct) or Upload-Post, with per-clip retry.
 6. **Cleanup** — delete local project data.
+
+## Troubleshooting
+
+| Problem | Likely cause | Fix |
+|---------|-------------|-----|
+| `input not found` | AutoClip default `%APPDATA%\AutoClip` path | Set `AUTOCLIP_DATA_DIR=D:\acdata` (no spaces) |
+| Produce fails with model errors | Invalid model name or missing API key | Check `API_MODEL_NAME` and `API_OPENAI_API_KEY` in `.env` |
+| Upload fails silently | OAuth token missing/expired | Run `python autoclip_watch.py youtube-login` |
+| Long video never finishes | YouTube throttling download | Split threshold handles this; sections download independently |
+| Clips produced but not published | Previous run marked `done` incorrectly | Fixed: statuses are now `produced`/`publishing`/`published`/`failed`; re-run retries failed uploads |
 
 ## Use it on content you own (or have permission for)
 
