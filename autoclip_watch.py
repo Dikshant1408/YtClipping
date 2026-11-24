@@ -213,8 +213,17 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                                                                                  for p in all_platforms))}
                             _save_split_state(state, video_id, platforms, section_progress)
                             continue
-                        # found is None -> reconciliation error, keep upload_unknown,
-                        # fall through to retry below.
+                        # found is None -> reconciliation error, keep upload_unknown.
+                        # Do NOT retry — YouTube may have already processed the upload.
+                        # Persist state and stop this clip's attempt for manual review.
+                        clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                        section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": saved_project_id,
+                                                      "clip_ids": saved_clip_ids, "clips": sec_clips,
+                                                      "uploaded": sum(1 for c in sec_clips.values()
+                                                                      if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                             for p in all_platforms))}
+                        _save_split_state(state, video_id, platforms, section_progress)
+                        continue
                     if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
                         log(f"[split] part {i+1} clip {vi} ({cid}) -> {pub_plat}: max attempts reached, skipping")
                         part_failed = True
@@ -456,8 +465,17 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                                                                              for p in all_platforms))}
                         _save_split_state(state, video_id, platforms, section_progress)
                         continue
-                    # found is None -> reconciliation error, keep upload_unknown,
-                    # fall through to retry below.
+                    # found is None -> reconciliation error, keep upload_unknown.
+                    # Do NOT retry — YouTube may have already processed the upload.
+                    # Persist state and stop this clip's attempt for manual review.
+                    clip_track.setdefault("platforms", {})[pub_plat] = plat_track
+                    section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
+                                                  "clip_ids": clip_ids, "clips": sec_clips,
+                                                  "uploaded": sum(1 for c in sec_clips.values()
+                                                                  if all(c.get("platforms", {}).get(p, {}).get("status") == "published"
+                                                                         for p in all_platforms))}
+                    _save_split_state(state, video_id, platforms, section_progress)
+                    continue
                 if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
                     log(f"[split] part {i+1} clip {vi} ({cid}) -> {pub_plat}: max attempts reached, skipping")
                     part_failed = True
@@ -597,8 +615,9 @@ def _check_youtube_existing_upload(title: str) -> tuple[Optional[bool], Optional
 
     Returns (found, url):
       - (True, url)   -> found and owned by authenticated channel
-      - (False, None) -> definitively not found (checked, no match)
-      - (None, None)  -> error (OAuth, network, permissions) — can't determine
+      - (False, None) -> matching title exists but belongs to a different channel
+      - (None, None)  -> inconclusive (no matching title in search, or OAuth/
+                        network/API error) — cannot determine
 
     Only valid for YouTube platform — never call for TikTok, Instagram, etc.
     """
@@ -633,7 +652,12 @@ def _check_youtube_existing_upload(title: str) -> tuple[Optional[bool], Optional
                 if snippet.get("channelId") == auth_channel_id:
                     vid = item["id"]["videoId"]
                     return (True, f"https://youtu.be/{vid}")
-        return (False, None)
+                else:
+                    # Matching title but different channel — definitively NOT ours.
+                    return (False, None)
+        # No matching title found in search — inconclusive. The upload may exist
+        # beyond maxResults or not yet be indexed. Do not treat as definitive absence.
+        return (None, None)
     except Exception:  # noqa: BLE001
         # OAuth invalid, network failure, API error, permissions — can't determine.
         return (None, None)
@@ -886,8 +910,25 @@ def cmd_paste(args: argparse.Namespace) -> int:
                         })
                         state.save()
                         continue
-                    # found is None -> reconciliation error, keep upload_unknown,
-                    # fall through to retry below.
+                    # found is None -> reconciliation error, keep upload_unknown.
+                    # Do NOT retry — YouTube may have already processed the upload.
+                    # Persist state and stop this clip's attempt for manual review.
+                    clips_upload[cid]["platforms"][pub_plat] = plat_track
+                    all_platforms = [publish_platform(p) for p in platforms]
+                    all_statuses = [c2["platforms"].get(p, {}).get("status", "pending")
+                                    for c2 in clips_upload.values() for p in all_platforms]
+                    final_status = "published" if all(s == "published" for s in all_statuses) else \
+                        ("partially_published" if any(s == "published" for s in all_statuses) else "failed")
+                    published_list = [c2["platforms"].get(p, {})
+                                      for c2 in clips_upload.values() for p in all_platforms
+                                      if c2["platforms"].get(p, {}).get("status") == "published"]
+                    state.put(video_id, {
+                        "status": final_status, "project_id": project_id, "platforms": platforms,
+                        "clips": clips, "selected_clip_ids": clip_ids, "clips_upload": clips_upload,
+                        "published": published_list, "resume_attempts": resume_attempts,
+                    })
+                    state.save()
+                    continue
                 if plat_track["attempts"] >= max(1, cfg.max_attempts_per_video):
                     log(f"       clip {cid} -> {pub_plat}: max attempts reached, skipping")
                     failed.append(Path(v['path']).name)

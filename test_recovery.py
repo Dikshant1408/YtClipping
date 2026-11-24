@@ -1,4 +1,4 @@
-"""Tests for YtClipping recovery & reliability fixes (v1.1.4).
+"""Tests for YtClipping recovery & reliability fixes (v1.1.6).
 
 Covers:
   - Resume failed jobs with empty clips (retry production, non-zero exit)
@@ -605,6 +605,232 @@ def test_check_youtube_existing_upload_no_token(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Test 13: Reconciliation confirms owned video → marks published, no retry
+# ---------------------------------------------------------------------------
+def test_reconciliation_confirms_owned_video(tmp_path):
+    """When reconciliation finds a matching video owned by the authenticated
+    channel, the upload should be marked published and NOT retried."""
+    cfg_path = write_config(tmp_path)
+    state_path = write_state(tmp_path, {
+        "rec_vid": {
+            "status": "produced",
+            "project_id": "proj-reconcile",
+            "platforms": ["youtube"],
+            "clips": [{"id": "clip_a", "title": "My Clip"}],
+            "selected_clip_ids": ["clip_a"],
+            "clips_upload": {
+                "clip_a": {
+                    "status": "pending",
+                    "platforms": {
+                        "youtube": {"status": "upload_unknown", "youtube_id": None,
+                                    "youtube_url": None, "error": None, "attempts": 1}
+                    }
+                }
+            },
+            "resume_attempts": 0,
+        }
+    })
+    (tmp_path / "clip.mp4").write_bytes(b"fake video")
+
+    fake_secret = tmp_path / "client_secret.json"
+    fake_secret.write_text("{}")
+
+    args = Args(config=str(cfg_path), state=str(state_path),
+                url="https://www.youtube.com/watch?v=rec_vid",
+                platform=None, no_publish=False, clips=5, privacy="unlisted")
+
+    upload_call_count = {"n": 0}
+
+    def fake_upload_video(*a, **k):
+        upload_call_count["n"] += 1
+        raise RuntimeError("should not be called after reconciliation confirms")
+
+    with patch("autoclip_watch.ch_mod.video_duration", return_value=None), \
+         patch("autoclip_watch.yt.CLIENT_SECRET", fake_secret), \
+         patch("autoclip_watch.ch_mod.video_uploader", return_value=None), \
+         patch("autoclip_watch.yt.rendered_videos", return_value=[{"id": "clip_a", "path": str(tmp_path / "clip.mp4"), "title": "My Clip", "description": ""}]), \
+         patch("autoclip_watch._check_youtube_existing_upload", return_value=(True, "https://youtu.be/confirmed_vid")), \
+         patch("autoclip_watch.yt.upload_video", side_effect=fake_upload_video):
+        rc = cmd_paste(args)
+
+    assert upload_call_count["n"] == 0, f"upload should NOT be retried after reconciliation confirms, called {upload_call_count['n']} time(s)"
+    state = State(state_path)
+    rec = state.get("rec_vid")
+    track = rec.get("clips_upload", {}).get("clip_a", {}).get("platforms", {}).get("youtube", {})
+    assert track.get("status") == "published", f"should be published, got {track.get('status')}"
+    assert track.get("youtube_url") == "https://youtu.be/confirmed_vid", f"should have reconciled URL, got {track.get('youtube_url')}"
+
+
+# ---------------------------------------------------------------------------
+# Test 14: Reconciliation finds wrong channel → marks failed (allows retry)
+# ---------------------------------------------------------------------------
+def test_reconciliation_wrong_channel(tmp_path):
+    """When reconciliation finds a matching title but different channel,
+    the upload should be marked failed (definitively not ours)."""
+    cfg_path = write_config(tmp_path)
+    state_path = write_state(tmp_path, {
+        "rec_vid2": {
+            "status": "produced",
+            "project_id": "proj-reconcile2",
+            "platforms": ["youtube"],
+            "clips": [{"id": "clip_a", "title": "My Clip"}],
+            "selected_clip_ids": ["clip_a"],
+            "clips_upload": {
+                "clip_a": {
+                    "status": "pending",
+                    "platforms": {
+                        "youtube": {"status": "upload_unknown", "youtube_id": None,
+                                    "youtube_url": None, "error": None, "attempts": 1}
+                    }
+                }
+            },
+            "resume_attempts": 0,
+        }
+    })
+    (tmp_path / "clip.mp4").write_bytes(b"fake video")
+
+    fake_secret = tmp_path / "client_secret.json"
+    fake_secret.write_text("{}")
+
+    args = Args(config=str(cfg_path), state=str(state_path),
+                url="https://www.youtube.com/watch?v=rec_vid2",
+                platform=None, no_publish=False, clips=5, privacy="unlisted")
+
+    upload_call_count = {"n": 0}
+
+    def fake_upload_video(*a, **k):
+        upload_call_count["n"] += 1
+        return {"id": "vid-1", "url": "https://youtu.be/vid-1", "privacy": "unlisted"}
+
+    with patch("autoclip_watch.ch_mod.video_duration", return_value=None), \
+         patch("autoclip_watch.yt.CLIENT_SECRET", fake_secret), \
+         patch("autoclip_watch.ch_mod.video_uploader", return_value=None), \
+         patch("autoclip_watch.yt.rendered_videos", return_value=[{"id": "clip_a", "path": str(tmp_path / "clip.mp4"), "title": "My Clip", "description": ""}]), \
+         patch("autoclip_watch._check_youtube_existing_upload", return_value=(False, None)), \
+         patch("autoclip_watch.yt.upload_video", side_effect=fake_upload_video):
+        rc = cmd_paste(args)
+
+    assert upload_call_count["n"] == 0, f"upload should NOT be retried in this run when wrong channel found (marked failed, retries on next run), called {upload_call_count['n']} time(s)"
+    state = State(state_path)
+    rec = state.get("rec_vid2")
+    track = rec.get("clips_upload", {}).get("clip_a", {}).get("platforms", {}).get("youtube", {})
+    assert track.get("status") == "failed", f"should be failed, got {track.get('status')}"
+
+
+# ---------------------------------------------------------------------------
+# Test 15: Reconciliation error (None) → preserves upload_unknown, NO retry (duplicate prevention)
+# ---------------------------------------------------------------------------
+def test_reconciliation_error_prevents_duplicate(tmp_path):
+    """When reconciliation returns None (error/network/OAuth), the upload should
+    remain upload_unknown and NOT be retried — preventing duplicates."""
+    cfg_path = write_config(tmp_path)
+    state_path = write_state(tmp_path, {
+        "rec_vid3": {
+            "status": "produced",
+            "project_id": "proj-reconcile3",
+            "platforms": ["youtube"],
+            "clips": [{"id": "clip_a", "title": "My Clip"}],
+            "selected_clip_ids": ["clip_a"],
+            "clips_upload": {
+                "clip_a": {
+                    "status": "pending",
+                    "platforms": {
+                        "youtube": {"status": "upload_unknown", "youtube_id": None,
+                                    "youtube_url": None, "error": None, "attempts": 1}
+                    }
+                }
+            },
+            "resume_attempts": 0,
+        }
+    })
+    (tmp_path / "clip.mp4").write_bytes(b"fake video")
+
+    fake_secret = tmp_path / "client_secret.json"
+    fake_secret.write_text("{}")
+
+    args = Args(config=str(cfg_path), state=str(state_path),
+                url="https://www.youtube.com/watch?v=rec_vid3",
+                platform=None, no_publish=False, clips=5, privacy="unlisted")
+
+    upload_call_count = {"n": 0}
+
+    def fake_upload_video(*a, **k):
+        upload_call_count["n"] += 1
+        return {"id": "vid-1", "url": "https://youtu.be/vid-1", "privacy": "unlisted"}
+
+    with patch("autoclip_watch.ch_mod.video_duration", return_value=None), \
+         patch("autoclip_watch.yt.CLIENT_SECRET", fake_secret), \
+         patch("autoclip_watch.ch_mod.video_uploader", return_value=None), \
+         patch("autoclip_watch.yt.rendered_videos", return_value=[{"id": "clip_a", "path": str(tmp_path / "clip.mp4"), "title": "My Clip", "description": ""}]), \
+         patch("autoclip_watch._check_youtube_existing_upload", return_value=(None, None)), \
+         patch("autoclip_watch.yt.upload_video", side_effect=fake_upload_video):
+        rc = cmd_paste(args)
+
+    assert upload_call_count["n"] == 0, f"upload should NOT be retried when reconciliation errors, called {upload_call_count['n']} time(s)"
+    state = State(state_path)
+    rec = state.get("rec_vid3")
+    track = rec.get("clips_upload", {}).get("clip_a", {}).get("platforms", {}).get("youtube", {})
+    assert track.get("status") == "upload_unknown", f"should remain upload_unknown, got {track.get('status')}"
+    assert track.get("attempts") == 1, f"attempts should not increment, got {track.get('attempts')}"
+
+
+# ---------------------------------------------------------------------------
+# Test 16: Search missing existing upload → inconclusive (None), NO retry
+# ---------------------------------------------------------------------------
+def test_search_missing_upload_prevents_retry(tmp_path):
+    """When search finds no matching title (inconclusive), the upload should
+    remain upload_unknown and NOT be retried."""
+    cfg_path = write_config(tmp_path)
+    state_path = write_state(tmp_path, {
+        "rec_vid4": {
+            "status": "produced",
+            "project_id": "proj-reconcile4",
+            "platforms": ["youtube"],
+            "clips": [{"id": "clip_a", "title": "My Clip"}],
+            "selected_clip_ids": ["clip_a"],
+            "clips_upload": {
+                "clip_a": {
+                    "status": "pending",
+                    "platforms": {
+                        "youtube": {"status": "upload_unknown", "youtube_id": None,
+                                    "youtube_url": None, "error": None, "attempts": 1}
+                    }
+                }
+            },
+            "resume_attempts": 0,
+        }
+    })
+    (tmp_path / "clip.mp4").write_bytes(b"fake video")
+
+    fake_secret = tmp_path / "client_secret.json"
+    fake_secret.write_text("{}")
+
+    args = Args(config=str(cfg_path), state=str(state_path),
+                url="https://www.youtube.com/watch?v=rec_vid4",
+                platform=None, no_publish=False, clips=5, privacy="unlisted")
+
+    upload_call_count = {"n": 0}
+
+    def fake_upload_video(*a, **k):
+        upload_call_count["n"] += 1
+        return {"id": "vid-1", "url": "https://youtu.be/vid-1", "privacy": "unlisted"}
+
+    with patch("autoclip_watch.ch_mod.video_duration", return_value=None), \
+         patch("autoclip_watch.yt.CLIENT_SECRET", fake_secret), \
+         patch("autoclip_watch.ch_mod.video_uploader", return_value=None), \
+         patch("autoclip_watch.yt.rendered_videos", return_value=[{"id": "clip_a", "path": str(tmp_path / "clip.mp4"), "title": "My Clip", "description": ""}]), \
+         patch("autoclip_watch._check_youtube_existing_upload", return_value=(None, None)), \
+         patch("autoclip_watch.yt.upload_video", side_effect=fake_upload_video):
+        rc = cmd_paste(args)
+
+    assert upload_call_count["n"] == 0, f"upload should NOT be retried when search is inconclusive, called {upload_call_count['n']} time(s)"
+    state = State(state_path)
+    rec = state.get("rec_vid4")
+    track = rec.get("clips_upload", {}).get("clip_a", {}).get("platforms", {}).get("youtube", {})
+    assert track.get("status") == "upload_unknown", f"should remain upload_unknown, got {track.get('status')}"
+
+
+# ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -623,6 +849,10 @@ if __name__ == "__main__":
         ("test_cmd_run_nonzero_on_failures", test_cmd_run_nonzero_on_failures),
         ("test_upload_attempt_persisted_before_request", test_upload_attempt_persisted_before_request),
         ("test_check_youtube_existing_upload_no_token", test_check_youtube_existing_upload_no_token),
+        ("test_reconciliation_confirms_owned_video", test_reconciliation_confirms_owned_video),
+        ("test_reconciliation_wrong_channel", test_reconciliation_wrong_channel),
+        ("test_reconciliation_error_prevents_duplicate", test_reconciliation_error_prevents_duplicate),
+        ("test_search_missing_upload_prevents_retry", test_search_missing_upload_prevents_retry),
     ]
 
     passed = 0
