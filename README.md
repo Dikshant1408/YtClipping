@@ -15,14 +15,14 @@ paste URL ──► download ──► AutoClip (transcribe + analyze + render)
           ──► upload Shorts to your channel ──► delete local files
 ```
 
-**Version:** 1.1.2 · **License:** MIT
+**Version:** 1.1.3 · **License:** MIT
 
 ## Quick start (under 2 minutes)
 
 ```bash
 git clone https://github.com/Dikshant1408/YtClipping.git
 cd YtClipping
-pip install autoclip-mcp google-api-python-client google-auth-oauthlib
+pip install -r requirements.txt
 copy .env.example .env          # add your model API key (Gemini/Groq/OpenAI)
 python autoclip_watch.py youtube-login
 python autoclip_watch.py paste "https://www.youtube.com/watch?v=YOUR_VIDEO"

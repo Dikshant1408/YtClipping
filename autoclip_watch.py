@@ -96,6 +96,10 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
     Uses a unique temp directory per job and tracks per-clip upload
     status within each section so interrupted jobs can resume without
     duplicating already-uploaded clips.
+
+    Section progress saves the AutoClip project_id and original clip IDs so a
+    partially-uploaded section resumes publishing from the saved project
+    instead of re-downloading and re-producing the whole section.
     """
     threshold = cfg.split_threshold_sec
     part_sec = cfg.split_part_sec
@@ -133,6 +137,99 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
         ):
             log(f"[split] part {i+1}/{parts}: max section attempts reached, skipping")
             failed_parts.append(i + 1)
+            continue
+
+        # Resume publishing from a saved AutoClip project instead of
+        # re-downloading/re-producing the whole section.
+        saved_project_id = sec.get("project_id") or ""
+        saved_clip_ids = sec.get("clip_ids") or []
+        if sec.get("status") in ("partial", "processing") and saved_project_id and saved_clip_ids:
+            log(f"[split] part {i+1}/{parts}: resuming from saved project {saved_project_id}, {len(saved_clip_ids)} clip(s)")
+            part_failed = False
+            part_uploaded = 0
+            for vi, cid in enumerate(saved_clip_ids):
+                clip_key = str(vi)
+                clip_track = sec_clips.get(clip_key, {"status": "pending", "attempts": 0,
+                                                       "clip_id": cid, "path": None,
+                                                       "youtube_id": None, "youtube_url": None, "error": None})
+                if clip_track["status"] == "published":
+                    part_uploaded += 1
+                    continue
+                if clip_track["attempts"] >= max(1, cfg.max_attempts_per_video):
+                    log(f"[split] part {i+1} clip {vi} ({cid}): max attempts reached, skipping")
+                    part_failed = True
+                    sec_clips[clip_key] = clip_track
+                    continue
+                if not clip_track.get("path"):
+                    log(f"[split] part {i+1} clip {vi} ({cid}): no saved video path, skipping")
+                    part_failed = True
+                    sec_clips[clip_key] = clip_track
+                    continue
+                clip_track["attempts"] += 1
+                # Persist incremented attempt BEFORE the API request (crash safety).
+                sec_clips[clip_key] = clip_track
+                section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": saved_project_id,
+                                              "clip_ids": saved_clip_ids, "clips": sec_clips,
+                                              "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
+                _save_split_state(state, video_id, platforms, section_progress)
+                try:
+                    res = yt.upload_video(
+                        clip_track["path"],
+                        title=clip_track.get("title", f"Short {cid}"),
+                        description=clip_track.get("description", ""),
+                        privacy=args.privacy,
+                        is_short=True,
+                        credit=credit,
+                        game=cfg.game,
+                        category_id=cfg.category_id,
+                        language=cfg.language,
+                        made_for_kids=cfg.made_for_kids,
+                    )
+                    clip_track["status"] = "published"
+                    clip_track["youtube_id"] = res.get("id")
+                    clip_track["youtube_url"] = res.get("url")
+                    clip_track["error"] = None
+                    part_uploaded += 1
+                    log(f"[split] uploaded {res['url']}")
+                except Exception as exc:  # noqa: BLE001
+                    part_failed = True
+                    clip_track["status"] = "failed"
+                    clip_track["error"] = str(exc)
+                    log(f"[split] upload failed for clip {cid}: {exc}")
+
+                sec_clips[clip_key] = clip_track
+                section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": saved_project_id,
+                                              "clip_ids": saved_clip_ids, "clips": sec_clips,
+                                              "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
+                _save_split_state(state, video_id, platforms, section_progress)
+
+            # Clean up the section source file if present.
+            out = job_tmp / f"part_{i}.mp4"
+            _safe_remove(str(out))
+
+            part_uploaded = sum(1 for c in sec_clips.values() if c["status"] == "published")
+            total += part_uploaded
+
+            all_clips = [c for c in sec_clips.values()]
+            if not all_clips:
+                section_status = "failed"
+            elif part_failed and part_uploaded == 0:
+                section_status = "failed"
+            elif part_failed:
+                section_status = "partial"
+            else:
+                section_status = "done"
+            section_progress[part_key] = {
+                "status": section_status,
+                "project_id": saved_project_id,
+                "clip_ids": saved_clip_ids,
+                "clips": sec_clips,
+                "uploaded": part_uploaded,
+                "error": None if not part_failed else "some uploads failed",
+            }
+            _save_split_state(state, video_id, platforms, section_progress)
+            if part_failed:
+                failed_parts.append(i + 1)
             continue
 
         start = i * part_sec
@@ -177,11 +274,33 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
             }
             _save_split_state(state, video_id, platforms, section_progress)
             continue
+
+        # Extract original clip IDs and rendered video paths for stable identity.
+        all_clips = extract_clips(data)
+        clip_ids = [str(c.get("id") or c.get("clip_id")) for c in all_clips]
         videos = yt.rendered_videos(data)[: max(1, args.clips)]
+
+        # Build clip tracks with stable clip_id + path mapping.
+        sec_clips = {}
+        for vi, v in enumerate(videos):
+            cid = clip_ids[vi] if vi < len(clip_ids) else str(vi)
+            sec_clips[str(vi)] = {
+                "status": "pending", "attempts": 0,
+                "clip_id": cid,
+                "path": v.get("path"),
+                "title": v.get("title", f"Short {cid}"),
+                "description": v.get("description", ""),
+                "youtube_id": None, "youtube_url": None, "error": None,
+            }
+
         part_failed = False
         for vi, v in enumerate(videos):
             clip_key = str(vi)
+            cid = clip_ids[vi] if vi < len(clip_ids) else str(vi)
             clip_track = sec_clips.get(clip_key, {"status": "pending", "attempts": 0,
+                                                   "clip_id": cid, "path": v.get("path"),
+                                                   "title": v.get("title", f"Short {cid}"),
+                                                   "description": v.get("description", ""),
                                                    "youtube_id": None, "youtube_url": None, "error": None})
             # Skip already-published clips (per-clip resume).
             if clip_track["status"] == "published":
@@ -191,19 +310,21 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                 clip_track["status"] = "published"
                 clip_track["attempts"] = 1
                 sec_clips[clip_key] = clip_track
-                section_progress[part_key] = {"status": sec.get("status", "processing"), "clips": sec_clips,
+                section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
+                                              "clip_ids": clip_ids, "clips": sec_clips,
                                               "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
                 _save_split_state(state, video_id, platforms, section_progress)
                 continue
             if clip_track["attempts"] >= max(1, cfg.max_attempts_per_video):
-                log(f"[split] part {i+1} clip {vi}: max attempts reached, skipping")
+                log(f"[split] part {i+1} clip {vi} ({cid}): max attempts reached, skipping")
                 part_failed = True
                 sec_clips[clip_key] = clip_track
                 continue
             clip_track["attempts"] += 1
             # Persist incremented attempt BEFORE the API request (crash safety).
             sec_clips[clip_key] = clip_track
-            section_progress[part_key] = {"status": sec.get("status", "processing"), "clips": sec_clips,
+            section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
+                                          "clip_ids": clip_ids, "clips": sec_clips,
                                           "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
             _save_split_state(state, video_id, platforms, section_progress)
             try:
@@ -231,7 +352,8 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
                 log(f"[split] upload failed for {Path(v['path']).name}: {exc}")
 
             sec_clips[clip_key] = clip_track
-            section_progress[part_key] = {"status": sec.get("status", "processing"), "clips": sec_clips,
+            section_progress[part_key] = {"status": sec.get("status", "processing"), "project_id": pid,
+                                          "clip_ids": clip_ids, "clips": sec_clips,
                                           "uploaded": sum(1 for c in sec_clips.values() if c["status"] == "published")}
             _save_split_state(state, video_id, platforms, section_progress)
         cleanup_project(pid)
@@ -241,10 +363,10 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
         total += part_uploaded
 
         # Determine section status: done only if all clips published (or no_publish).
-        all_clips = [c for c in sec_clips.values()]
+        all_clips_tracked = [c for c in sec_clips.values()]
         if args.no_publish:
             section_status = "done"
-        elif not all_clips:
+        elif not all_clips_tracked:
             section_status = "failed"
         elif part_failed and part_uploaded == 0:
             section_status = "failed"
@@ -254,6 +376,8 @@ def _paste_split(args, cfg, state, video_id, duration, platforms, portrait_style
             section_status = "done"
         section_progress[part_key] = {
             "status": section_status,
+            "project_id": pid,
+            "clip_ids": clip_ids,
             "clips": sec_clips,
             "uploaded": part_uploaded,
             "error": None if not part_failed else "some uploads failed",
@@ -441,8 +565,13 @@ def cmd_paste(args: argparse.Namespace) -> int:
         # rendered_videos needs clip paths; map clip ids to rendered videos by index.
         videos = yt.rendered_videos({"outputs": clips}) if clips else []
         videos = videos[: max(1, args.clips)]
-        # Align clip_ids with available rendered videos.
-        clip_ids = [str(v.get("id", i)) for i, v in enumerate(videos)]
+        # Align clip_ids with available rendered videos using stable original IDs
+        # from saved state (or fresh clips), not index-based IDs which can mismatch
+        # saved selected_clip_ids / clips_upload records across recovery.
+        if saved and saved.get("selected_clip_ids"):
+            clip_ids = [str(cid) for cid in saved["selected_clip_ids"][: len(videos)]]
+        else:
+            clip_ids = [str(c.get("id") or c.get("clip_id")) for c in clips[: len(videos)]]
         # Rebuild tracking for the aligned clip set.
         clips_upload = {}
         for cid in clip_ids:
